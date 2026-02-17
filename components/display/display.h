@@ -8,10 +8,21 @@
 extern "C" {
 #endif
 
+typedef enum {
+    DISPLAY_I2C_MODE_HW = 0,
+    DISPLAY_I2C_MODE_SW = 1,
+} display_i2c_mode_t;
+
 esp_err_t display_init(int sda_pin,
                        int scl_pin,
                        uint32_t i2c_freq_hz,
                        uint8_t i2c_addr);
+
+esp_err_t display_init_with_mode(int sda_pin,
+                                 int scl_pin,
+                                 uint32_t i2c_freq_hz,
+                                 uint8_t i2c_addr,
+                                 display_i2c_mode_t mode);
 
 void display_clear(void);
 void display_printf(int x, int y, const char *fmt, ...);

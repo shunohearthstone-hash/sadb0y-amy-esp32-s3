@@ -15,6 +15,7 @@
 
 # Log files
 *.log
+.history/
 
 # Build artifacts and directories
 **/build/
@@ -29,13 +30,22 @@ build/
 *.elf
 *.map
 flasher_args.json # Generated in build directory
-sdkconfig.old
-sdkconfig
+
 
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/
+/components/amy/amy
+
 **/components/.idf/
+/components/amy/sounds
+/components/amy/daisy
+/components/amy/experiments
+/components/amy/
+
+
+
+
 # For modern ESP-IDF component manager
 managed_components/
 # If ESP-IDF tools are installed/referenced locally to the project
@@ -65,7 +75,9 @@ env/
 .clangd/
 .ccls-cache/
 compile_commands.json
-
+.cache\*
+.cache/*
+.zed/
 # Windows specific
 Thumbs.db
 ehthumbs.db

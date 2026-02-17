@@ -13,6 +13,8 @@
 
 #ifdef ESP_PLATFORM
 #include <esp_task.h>
+#include <esp_log.h>
+static const char *TAG = "amy_i2s";
 
 ///////////////////////////////////////////////////////////////
 // ESP32, S3, P4 (maybe others)
@@ -43,7 +45,7 @@ amy_err_t esp32_setup_i2s(void) {
 #ifdef I2S_32BIT
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AMY_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = (amy_global.config.i2s_mclk == -1)? I2S_GPIO_UNUSED : amy_global.config.i2s_mclk,
             .bclk = amy_global.config.i2s_bclk,
@@ -60,7 +62,7 @@ amy_err_t esp32_setup_i2s(void) {
 #else // 16 bit I2S
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AMY_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = (amy_global.config.i2s_mclk == -1)? I2S_GPIO_UNUSED : amy_global.config.i2s_mclk,
             .bclk = amy_global.config.i2s_bclk,
@@ -82,6 +84,11 @@ amy_err_t esp32_setup_i2s(void) {
     /* Before writing data, start the TX channel first */
     i2s_channel_enable(tx_handle);
     if(AMY_HAS_AUDIO_IN) i2s_channel_enable(rx_handle);
+    
+    ESP_LOGI(TAG, "I2S initialized (32-bit): BCLK=%d, WS=%d, DOUT=%d, DIN=%d", 
+             amy_global.config.i2s_bclk, amy_global.config.i2s_lrc, 
+             amy_global.config.i2s_dout, amy_global.config.i2s_din);
+
     return AMY_OK;
 }
 
@@ -227,6 +234,7 @@ void esp_fill_audio_buffer_task(void *param) {
 // init AMY from the esp. wraps some amy funcs in a task to do multicore rendering on the ESP32 
 void amy_platform_init() {
     amy_update_handle = xTaskGetCurrentTaskHandle();
+    ESP_LOGI(TAG, "AMY platform init: starting audio tasks");
     // Start i2s
     if (AMY_HAS_I2S) {
         esp32_setup_i2s();

@@ -18,22 +18,21 @@
 #include "amy.h"
 #include "freertos/queue.h"
 #include "freertos/event_groups.h"
-#include "esp_log.h"
 #include "esp_err.h"
 
 #include <stdlib.h>
 
 #include "driver/i2s_std.h"
-#include "driver/i2c_master.h"
 #include "esp_adc/adc_oneshot.h"
 
-#define CONFIG_I2S_BCLK 12 // 25
-#define CONFIG_I2S_LRCLK 11
+#define CONFIG_I2S_BCLK 11 // 25
+#define CONFIG_I2S_LRCLK 9
 #define CONFIG_I2S_DIN 10
 
-#define CONFIG_I2C_SDA 8
-#define CONFIG_I2C_SCL 9
-#define SSD1306_I2C_ADDR 0x3C
+#define CONFIG_I2C_SDA 15
+#define CONFIG_I2C_SCL 16
+#define SSD1315_I2C_ADDR 0x3C
+#define DISPLAY_I2C_MODE DISPLAY_I2C_MODE_SW
 
 #define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_3 // GPIO4 on ESP32-S3
 
@@ -87,13 +86,20 @@ void start_test_tone(uint32_t start) {
 }
 
 void update_tone_effect_from_pot(uint32_t now) {
-    int raw = 0;
+    static uint32_t last_print_time = 0;
+    int raw = 1755; // Default to ~440Hz if ADC fails
     if (adc_oneshot_read(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &raw) != ESP_OK) {
-        return;
+        // ADC failed, use default value
     }
 
     float normalized = (float)raw / 4095.0f;
     float freq_hz = 110.0f + (normalized * 770.0f);
+
+    // Print ADC value and frequency every 500ms
+    if (now - last_print_time > 500000) {
+        printf("ADC: %d, Freq: %.1f Hz\n", raw, freq_hz);
+        last_print_time = now;
+    }
 
     amy_event e = amy_default_event();
     e.time = now;
@@ -107,18 +113,20 @@ static void u8g2_task_function(void *pvParameters)
     (void)pvParameters;
     for (;;) {
         display_clear();
-        display_printf(0, 12, "ESP-IDF 6");
-        display_printf(0, 28, "Heap: %d", esp_get_free_heap_size());
+        display_printf(0, 12, "AMY Synth READY");
+        display_printf(0, 24, "Heap: %d KB", esp_get_free_heap_size() / 1024);
+        display_printf(0, 36, "I2S: B%d L%d D%d", CONFIG_I2S_BCLK, CONFIG_I2S_LRCLK, CONFIG_I2S_DIN);
         display_update();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
+
 void app_main(void)
 {
     printf("Hello world!\n");
 
-    display_init(CONFIG_I2C_SDA, CONFIG_I2C_SCL, 100000, SSD1306_I2C_ADDR);
+    display_init_with_mode(CONFIG_I2C_SDA, CONFIG_I2C_SCL, 100000, SSD1315_I2C_ADDR, DISPLAY_I2C_MODE);
     /* Print chip information */
     esp_chip_info_t chip_info;
     uint32_t flash_size;
@@ -146,11 +154,13 @@ void app_main(void)
 
     // Configure and start AMY
     amy_config_t amy_cfg = amy_default_config();
+    amy_cfg.audio = AMY_AUDIO_IS_I2S;
     amy_cfg.i2s_bclk = CONFIG_I2S_BCLK;
     amy_cfg.i2s_lrc = CONFIG_I2S_LRCLK;
     amy_cfg.i2s_dout = CONFIG_I2S_DIN;
     amy_cfg.i2s_din = -1;
     amy_cfg.i2s_mclk = -1;
+    printf("Starting AMY synth engine... (audio=%d, Fs=%d)\n", amy_cfg.audio, AMY_SAMPLE_RATE);
     amy_start(amy_cfg);
 
     // Setup ADC for frequency pot
@@ -159,10 +169,12 @@ void app_main(void)
     int64_t start_time = amy_sysclock();
     amy_reset_oscs();
 
+    printf("Scheduling test tone on OSC 0...\n");
     start_test_tone(start_time + 200);
 
     xTaskCreate(u8g2_task_function, "u8g2_task_function", u8g2_task_stack_size, NULL, 0, NULL);
 
+    printf("Main loop started: updating frequency from potentiometer\n");
     // Spin this core, updating synth params from the pot.
     for (;;) {
         update_tone_effect_from_pot(amy_sysclock());
