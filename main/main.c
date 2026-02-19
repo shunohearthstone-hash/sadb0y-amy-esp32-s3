@@ -44,9 +44,11 @@
 #define DISPLAY_I2C_MODE DISPLAY_I2C_MODE_SW
 // Potentiometer ADC channels
 #define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_3 // GPIO4 on ESP32-S3
+// Physical GPIO for the pot (matches ADC_CHANNEL_3 on ESP32-S3)
+#define POT_GPIO_NUM GPIO_NUM_4
 // Rotary encoder pins
-#define ENCODER_PIN_A GPIO_NUM_35
-#define ENCODER_PIN_B GPIO_NUM_36
+#define ENCODER_PIN_A GPIO_NUM_40
+#define ENCODER_PIN_B GPIO_NUM_41
 
 #define u8g2_task_stack_size (8 * 1024) // 8KB stack for the u8g2 task
 
@@ -91,6 +93,24 @@ static void encoder_task(void *pvParameters)
     }
 }
 
+static void encoder_init_task(void *pvParameters)
+{
+    (void)pvParameters;
+    // Delay init to avoid early-boot conflicts (PSRAM, console pins, etc.)
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    printf("[encoder_init] starting after delay\n");
+    rotary_encoder_config_t enc_cfg = rotary_encoder_default_config(ENCODER_PIN_A, ENCODER_PIN_B);
+    rotary_encoder_handle_t enc = NULL;
+    esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
+    printf("[encoder_init] rotary_encoder_new_with_config returned %d\n", err);
+    if (err == ESP_OK && enc) {
+        xTaskCreate(encoder_task, "encoder_task", 2048, enc, 5, NULL);
+    }
+
+    vTaskDelete(NULL);
+}
+
 // I2C recover sequence will be performed inline in app_main.
 
 
@@ -113,6 +133,11 @@ static amy_err_t setup_pot_adc(void) {
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &chan_cfg));
+    // Configure the GPIO pull to avoid floating inputs when the pot is
+    // physically disconnected. This biases the input to a known state
+    // and prevents unsafe sudden jumps in readings.
+    gpio_set_direction(POT_GPIO_NUM, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(POT_GPIO_NUM, GPIO_PULLDOWN_ONLY);
     return AMY_OK;
 }
 
@@ -145,6 +170,27 @@ static void pot_reader_task(void *pvParameters)
             continue;
         }
 
+        // Quick stability check: take a few fast samples and ensure the
+        // value isn't wildly fluctuating (which indicates a floating/unconnected pot).
+        bool unstable = false;
+        for (int i = 0; i < 2; ++i) {
+            int tmp = 0;
+            if (adc_oneshot_read(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &tmp) != ESP_OK) {
+                unstable = true;
+                break;
+            }
+            if (abs(tmp - raw) > 50) { // if samples vary more than ~50 counts, treat as unstable
+                unstable = true;
+                break;
+            }
+            raw = tmp;
+        }
+        if (unstable) {
+            // Skip this cycle; keep last known good values to avoid sudden jumps
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
         float normalized = (float)raw / 4095.0f;
         float freq_hz = 110.0f + (normalized * 770.0f);
 
@@ -155,8 +201,10 @@ static void pot_reader_task(void *pvParameters)
         // Compare against last sent frequency and only trigger AMY when change
         // exceeds the configured threshold (CHANGE_DELTA_HZ)
         if (fabsf(freq_hz - s_last_sent_pot_freq_hz) > CHANGE_DELTA_HZ) {
-            // Prepare and send the AMY event at current sysclock
-            amy_event e = amy_default_event();
+            // Prepare and send the AMY event at current sysclock.
+            // Use a static event to avoid allocating a large struct on the task stack.
+            static amy_event e;
+            e = amy_default_event();
             e.time = amy_sysclock();
             e.osc = 0;
             e.freq_coefs[0] = freq_hz;
@@ -206,6 +254,7 @@ void app_main(void)
     printf("Hello world!\n");
 
     // I2C recover: Flush Sequence ensure SDA released and toggle SCL 9 times
+    printf("[startup] before i2c_recover\n");
     gpio_set_direction(CONFIG_I2C_SDA, GPIO_MODE_INPUT);
 
     gpio_config_t io_conf = {
@@ -223,13 +272,16 @@ void app_main(void)
         gpio_set_level(CONFIG_I2C_SCL, 1);
         ets_delay_us(5);
     }
+    printf("[startup] after i2c_recover\n");
 
+    printf("[startup] before display_init_with_mode\n");
     display_init_with_mode(
         CONFIG_I2C_SDA,
          CONFIG_I2C_SCL,
          25000,
          SSD1315_I2C_ADDR,
          DISPLAY_I2C_MODE);
+    printf("[startup] after display_init_with_mode\n");
 
     /* Print chip information */
     esp_chip_info_t chip_info;
@@ -265,30 +317,19 @@ void app_main(void)
     amy_cfg.i2s_din = -1;
     amy_cfg.i2s_mclk = -1;
     printf("Starting AMY synth engine... (audio=%d, Fs=%d)\n", amy_cfg.audio, AMY_SAMPLE_RATE);
+    printf("[startup] before amy_start\n");
     amy_start(amy_cfg);
+    printf("[startup] after amy_start\n");
 
         // Setup rotary encoder
-        rotary_encoder_config_t enc_cfg = rotary_encoder_default_config
-        (ENCODER_PIN_A,
-             ENCODER_PIN_B);
-
-    rotary_encoder_handle_t enc = NULL;
-    esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
-    if (err != ESP_OK) {
-        printf("rotary encoder init failed: %d\n", err);
-    } else {
-        xTaskCreate(
-            encoder_task,
-             "encoder_task",
-             2048,
-             enc,
-             5,
-             NULL);
-    }
+    // Defer rotary encoder initialization to a task to avoid early-boot conflicts
+    xTaskCreate(encoder_init_task, "encoder_init_task", 2048, NULL, 5, NULL);
 
 
     // Setup ADC for frequency pot
+    printf("[startup] before setup_pot_adc\n");
     setup_pot_adc();
+    printf("[startup] after setup_pot_adc\n");
     
     int64_t start_time = amy_sysclock();
     amy_reset_oscs();
@@ -319,7 +360,7 @@ void app_main(void)
         "pot_reader_task",
         2048,
         NULL,
-        6,
+        4,
         NULL);
 
     printf("Main loop started: pot reader task running\n");

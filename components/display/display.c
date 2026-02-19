@@ -126,7 +126,7 @@ static uint8_t u8x8_gpio_and_delay_esp32(u8x8_t *u8x8,
             gpio_config_t io_conf = {
                 .pin_bit_mask = (1ULL << sw_i2c_sda_pin) | (1ULL << sw_i2c_scl_pin),
                 .mode = GPIO_MODE_INPUT,
-                .pull_up_en = GPIO_PULLUP_ENABLE,
+                .pull_up_en = GPIO_PULLUP_DISABLE,
                 .pull_down_en = GPIO_PULLDOWN_DISABLE,
                 .intr_type = GPIO_INTR_DISABLE,
             };
@@ -198,7 +198,7 @@ esp_err_t display_init_with_mode(int sda_pin,
             .sda_io_num = sda_pin,
             .scl_io_num = scl_pin,
             .glitch_ignore_cnt = 7,
-            .flags.enable_internal_pullup = true,
+            .flags.enable_internal_pullup = false,
         };
 
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &bus_handle));

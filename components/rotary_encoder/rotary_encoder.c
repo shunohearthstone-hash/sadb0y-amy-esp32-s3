@@ -55,18 +55,42 @@ static esp_err_t rotary_encoder_create_channels(pcnt_unit_handle_t unit, gpio_nu
         .level_gpio_num = pin_a,
     };
 
-    ESP_ERROR_CHECK(pcnt_new_channel(unit, &chan_a_config, &chan_a));
-    ESP_ERROR_CHECK(pcnt_new_channel(unit, &chan_b_config, &chan_b));
+    esp_err_t ret = pcnt_new_channel(unit, &chan_a_config, &chan_a);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt_new_channel A failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ret = pcnt_new_channel(unit, &chan_b_config, &chan_b);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt_new_channel B failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(chan_a,
-        PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(chan_a,
-        PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+    ret = pcnt_channel_set_edge_action(chan_a,
+        PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt_channel_set_edge_action A failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ret = pcnt_channel_set_level_action(chan_a,
+        PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt_channel_set_level_action A failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(chan_b,
-        PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(chan_b,
-        PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+    ret = pcnt_channel_set_edge_action(chan_b,
+        PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt_channel_set_edge_action B failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ret = pcnt_channel_set_level_action(chan_b,
+        PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt_channel_set_level_action B failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     return ESP_OK;
 }
@@ -94,19 +118,42 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
     rotary_encoder_t *encoder = calloc(1, sizeof(rotary_encoder_t));
     ESP_RETURN_ON_FALSE(encoder, ESP_ERR_NO_MEM, TAG, "no memory for encoder");
 
-    ESP_ERROR_CHECK(rotary_encoder_create_unit(&encoder->pcnt_unit, config->low_limit, config->high_limit));
+    /* validate pins */
+    if (!GPIO_IS_VALID_GPIO(config->pin_a) || !GPIO_IS_VALID_GPIO(config->pin_b)) {
+        ESP_LOGE(TAG, "invalid GPIO pins: A=%d B=%d", config->pin_a, config->pin_b);
+        goto err;
+    }
+
+    esp_err_t ret = rotary_encoder_create_unit(&encoder->pcnt_unit, config->low_limit, config->high_limit);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "pcnt unit create failed: %s", esp_err_to_name(ret));
+        goto err;
+    }
+
     if (config->glitch_filter_ns > 0) {
         pcnt_glitch_filter_config_t filter_config = {
             .max_glitch_ns = config->glitch_filter_ns,
         };
-        ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(encoder->pcnt_unit, &filter_config));
+        ret = pcnt_unit_set_glitch_filter(encoder->pcnt_unit, &filter_config);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "pcnt set glitch filter failed: %s", esp_err_to_name(ret));
+            goto err;
+        }
     }
 
-    ESP_ERROR_CHECK(rotary_encoder_create_channels(encoder->pcnt_unit, config->pin_a, config->pin_b));
+    ret = rotary_encoder_create_channels(encoder->pcnt_unit, config->pin_a, config->pin_b);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "create_channels failed: %s", esp_err_to_name(ret));
+        goto err;
+    }
 
     if (config->watch_points && config->watch_point_count > 0) {
         for (size_t i = 0; i < config->watch_point_count; i++) {
-            ESP_ERROR_CHECK(pcnt_unit_add_watch_point(encoder->pcnt_unit, config->watch_points[i]));
+            ret = pcnt_unit_add_watch_point(encoder->pcnt_unit, config->watch_points[i]);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "add_watch_point failed: %s", esp_err_to_name(ret));
+                goto err;
+            }
         }
     }
 
@@ -118,11 +165,18 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
     }
 
     pcnt_event_callbacks_t cbs = { .on_reach = pcnt_on_reach };
-    ESP_ERROR_CHECK(pcnt_unit_register_event_callbacks(encoder->pcnt_unit, &cbs, encoder->event_queue));
+    ret = pcnt_unit_register_event_callbacks(encoder->pcnt_unit, &cbs, encoder->event_queue);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "register_event_callbacks failed: %s", esp_err_to_name(ret));
+        goto err;
+    }
 
-    ESP_ERROR_CHECK(pcnt_unit_enable(encoder->pcnt_unit));
-    ESP_ERROR_CHECK(pcnt_unit_clear_count(encoder->pcnt_unit));
-    ESP_ERROR_CHECK(pcnt_unit_start(encoder->pcnt_unit));
+    ret = pcnt_unit_enable(encoder->pcnt_unit);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "pcnt_unit_enable failed: %s", esp_err_to_name(ret)); goto err; }
+    ret = pcnt_unit_clear_count(encoder->pcnt_unit);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "pcnt_unit_clear_count failed: %s", esp_err_to_name(ret)); goto err; }
+    ret = pcnt_unit_start(encoder->pcnt_unit);
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "pcnt_unit_start failed: %s", esp_err_to_name(ret)); goto err; }
 
     *out_handle = encoder;
     return ESP_OK;
