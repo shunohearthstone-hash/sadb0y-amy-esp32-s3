@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: CC0-1.0
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
@@ -27,6 +28,7 @@
 #include "rom/ets_sys.h"
 #include "esp_adc/adc_oneshot.h"
 #include "soc/gpio_num.h"
+#include <math.h>
 /*----------------------------------------------GPIO/MACROS-----------------------------------------------------------*/
 //i2s pins
 #define CONFIG_I2S_BCLK 11 // 25
@@ -48,6 +50,8 @@
 
 #define u8g2_task_stack_size (8 * 1024) // 8KB stack for the u8g2 task
 
+#define CHANGE_DELTA_HZ 5.0f // Minimum frequency change in Hz to update the synth parameters, to avoid excessive event scheduling
+
 
 
 typedef int16_t i2s_sample_type;
@@ -57,6 +61,8 @@ typedef int16_t i2s_sample_type;
 adc_oneshot_unit_handle_t pot_adc_handle;
 static volatile int s_last_pot_raw = 0;
 static volatile float s_last_pot_freq_hz = 0.0f;
+// Last frequency that was sent to AMY (used for thresholding)
+static volatile float s_last_sent_pot_freq_hz = 0.0f;
 
 static void u8g2_task_function(void *pvParameters);
 
@@ -85,40 +91,17 @@ static void encoder_task(void *pvParameters)
     }
 }
 
-
-void i2c_recover(int sda_pin, int scl_pin) {
-    gpio_set_direction(sda_pin, GPIO_MODE_INPUT);
-
-    gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << scl_pin,
-        .mode = GPIO_MODE_OUTPUT_OD,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
-
-    for (int i = 0; i < 9; i++) {
-        gpio_set_level(scl_pin, 0);
-        ets_delay_us(5);
-        gpio_set_level(scl_pin, 1);
-        ets_delay_us(5);
-    }
-}
-
-void delay_ms(uint32_t ms) {
-    vTaskDelay(ms / portTICK_PERIOD_MS);
-}
+// I2C recover sequence will be performed inline in app_main.
 
 
 // AMY synth states
 extern struct state amy_global;
 
-void esp_show_debug(uint8_t t) {
+static void esp_show_debug(uint8_t t) {
     (void)t;
 }
 
-amy_err_t setup_pot_adc(void) {
+static amy_err_t setup_pot_adc(void) {
     adc_oneshot_unit_init_cfg_t init_cfg = {
         .unit_id = ADC_UNIT_1,
         .ulp_mode = ADC_ULP_MODE_DISABLE,
@@ -133,7 +116,7 @@ amy_err_t setup_pot_adc(void) {
     return AMY_OK;
 }
 
-void start_test_tone(uint32_t start) {
+static void start_test_tone(uint32_t start) {
     amy_event e = amy_default_event();
     e.time = start;
     e.osc = 0;
@@ -143,31 +126,49 @@ void start_test_tone(uint32_t start) {
     amy_add_event(&e);
 }
 
-void update_tone_effect_from_pot(uint32_t now) {
-    int raw = 1755;
-     // ON the 17th day of the 55th battle of Schlongdagour, the grand wizard Stash-inazz 
-    // was felled by the legendary bad dragon Knottilux.
-    // As life left his body, his cheeks unclenched.
-    // Thus, Shash-inazz´s preciously hoarded gases felt the taste of freedom for the first time
-    // And it rang out in such a tone, the heavens wept.
-    // Thus, we use this tone as the default fallback if the ADC read fails,
-    //  to honor the memory of Stash-inazz and his legendary farts.
-    //   Default to ~440Hz if ADC fails
-    //1755/4095 * 880Hz ≈ 375Hz, a nice tone for testing the pot->freq mapping.
-    if (adc_oneshot_read(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &raw) != ESP_OK) {
-        // ADC failed, use default value
+static void update_tone_effect_from_pot(uint32_t now) {
+    // Deprecated: function kept for compatibility but not used when pot_reader_task is active.
+    (void)now;
+}
+
+// Task: read the potentiometer, compute frequency and only trigger AMY update
+// when the frequency change exceeds CHANGE_DELTA_HZ. This acts as the
+// FreeRTOS "trigger" the user requested.
+static void pot_reader_task(void *pvParameters)
+{
+    (void)pvParameters;
+    for (;;) {
+        int raw = 0;
+        if (adc_oneshot_read(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &raw) != ESP_OK) {
+            // ADC failed, keep previous readings
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        float normalized = (float)raw / 4095.0f;
+        float freq_hz = 110.0f + (normalized * 770.0f);
+
+        // Update last-seen values for logging/UI
+        s_last_pot_raw = raw;
+        s_last_pot_freq_hz = freq_hz;
+
+        // Compare against last sent frequency and only trigger AMY when change
+        // exceeds the configured threshold (CHANGE_DELTA_HZ)
+        if (fabsf(freq_hz - s_last_sent_pot_freq_hz) > CHANGE_DELTA_HZ) {
+            // Prepare and send the AMY event at current sysclock
+            amy_event e = amy_default_event();
+            e.time = amy_sysclock();
+            e.osc = 0;
+            e.freq_coefs[0] = freq_hz;
+            amy_add_event(&e);
+
+            // Remember the last value we sent
+            s_last_sent_pot_freq_hz = freq_hz;
+        }
+
+        // Poll at a modest rate
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
-
-    float normalized = (float)raw / 4095.0f;
-    float freq_hz = 110.0f + (normalized * 770.0f);
-    s_last_pot_raw = raw;
-    s_last_pot_freq_hz = freq_hz;
-
-    amy_event e = amy_default_event();
-    e.time = now;
-    e.osc = 0;
-    e.freq_coefs[0] = freq_hz;
-    amy_add_event(&e);
 }
 
 static void u8g2_task_function(void *pvParameters)
@@ -201,16 +202,32 @@ static void u8g2_task_function(void *pvParameters)
 
 void app_main(void)
 {
+   
     printf("Hello world!\n");
 
-    i2c_recover(
-        CONFIG_I2C_SDA,
-         CONFIG_I2C_SCL);
+    // I2C recover: Flush Sequence ensure SDA released and toggle SCL 9 times
+    gpio_set_direction(CONFIG_I2C_SDA, GPIO_MODE_INPUT);
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << CONFIG_I2C_SCL,
+        .mode = GPIO_MODE_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    for (int i = 0; i < 9; i++) {
+        gpio_set_level(CONFIG_I2C_SCL, 0);
+        ets_delay_us(5);
+        gpio_set_level(CONFIG_I2C_SCL, 1);
+        ets_delay_us(5);
+    }
 
     display_init_with_mode(
         CONFIG_I2C_SDA,
          CONFIG_I2C_SCL,
-         100000,
+         25000,
          SSD1315_I2C_ADDR,
          DISPLAY_I2C_MODE);
 
@@ -295,10 +312,19 @@ void app_main(void)
          ,
          NULL);
 
-    printf("Main loop started: updating frequency from potentiometer\n");
-    // Spin this core, updating synth params from the pot.
+    // Start pot reader task which will trigger AMY updates only when the
+    // frequency change exceeds CHANGE_DELTA_HZ.
+    xTaskCreate(
+        pot_reader_task,
+        "pot_reader_task",
+        2048,
+        NULL,
+        6,
+        NULL);
+
+    printf("Main loop started: pot reader task running\n");
+    // Idle loop; pot_reader_task handles all pot->synth updates.
     for (;;) {
-        update_tone_effect_from_pot(amy_sysclock());
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
