@@ -41,7 +41,7 @@ amy_err_t esp32_setup_i2s(void) {
     }
 // PCM5101 DAC works at either 32 bit or (default) 16 bit
 // PCM1808 ADC needs I2S_32BIT to work
-#define I2S_32BIT
+//#define I2S_32BIT
 #ifdef I2S_32BIT
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AMY_SAMPLE_RATE),

@@ -1,7 +1,7 @@
 idf_component_register(SRCS
     "main.c"
-    PRIV_REQUIRES spi_flash esp_driver_i2s esp_driver_i2c esp_adc esp_driver_uart esp_timer display
-    REQUIRES amy
+    PRIV_REQUIRES spi_flash esp_driver_i2s esp_driver_i2c esp_adc esp_driver_uart esp_timer display rotary_encoder
+    REQUIRES amy 
     INCLUDE_DIRS "."
 )
 
