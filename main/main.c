@@ -8,7 +8,8 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
-#include "display.h"
+#include "priv_i2c_u8g2.h"
+#include "u8g2.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -41,7 +42,6 @@
 #define CONFIG_I2C_SDA 15
 #define CONFIG_I2C_SCL 16
 #define SSD1315_I2C_ADDR 0x3C
-#define DISPLAY_I2C_MODE DISPLAY_I2C_MODE_SW
 // Potentiometer ADC channels
 #define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_3 // GPIO4 on ESP32-S3
 // Physical GPIO for the pot (matches ADC_CHANNEL_3 on ESP32-S3)
@@ -61,6 +61,8 @@ typedef int16_t i2s_sample_type;
 
 
 adc_oneshot_unit_handle_t pot_adc_handle;
+static i2c_u8g2_handle_t s_display;
+static u8g2_t *s_u8g2 = NULL;
 static volatile int s_last_pot_raw = 0;
 static volatile float s_last_pot_freq_hz = 0.0f;
 // Last frequency that was sent to AMY (used for thresholding)
@@ -222,26 +224,26 @@ static void pot_reader_task(void *pvParameters)
 static void u8g2_task_function(void *pvParameters)
 {
     (void)pvParameters;
+    if (s_u8g2 == NULL) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    u8g2_SetFont(s_u8g2, u8g2_font_6x10_tf);
+
     for (;;) {
-        display_clear();
+        char line[32];
+        u8g2_ClearBuffer(s_u8g2);
 
-        display_printf(
-            0, 12,
-              "AMY Synth READY");
+        u8g2_DrawStr(s_u8g2, 0, 12, "AMY Synth READY");
 
-        display_printf(
-            0,24,
-              "Heap: %d KB",
-               esp_get_free_heap_size() / 1024);
+        snprintf(line, sizeof(line), "Heap: %u KB", esp_get_free_heap_size() / 1024);
+        u8g2_DrawStr(s_u8g2, 0, 24, line);
 
-        display_printf(
-            0,36,
-            "I2S: B%d L%d D%d",
-               CONFIG_I2S_BCLK,
-               CONFIG_I2S_LRCLK,
-               CONFIG_I2S_DIN);
+        snprintf(line, sizeof(line), "I2S: B%d L%d D%d", CONFIG_I2S_BCLK, CONFIG_I2S_LRCLK, CONFIG_I2S_DIN);
+        u8g2_DrawStr(s_u8g2, 0, 36, line);
 
-        display_update();
+        u8g2_SendBuffer(s_u8g2);
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -252,7 +254,7 @@ void app_main(void)
 {
    
     printf("Hello world!\n");
-
+/*
     // I2C recover: Flush Sequence ensure SDA released and toggle SCL 9 times
     printf("[startup] before i2c_recover\n");
     gpio_set_direction(CONFIG_I2C_SDA, GPIO_MODE_INPUT);
@@ -273,15 +275,27 @@ void app_main(void)
         ets_delay_us(5);
     }
     printf("[startup] after i2c_recover\n");
+*/
+    printf("[startup] before i2c_u8g2_init\n");
+    i2c_u8g2_config_t display_cfg = i2c_u8g2_config_default();
+    display_cfg.sda_io_num = CONFIG_I2C_SDA;
+    display_cfg.scl_io_num = CONFIG_I2C_SCL;
+    display_cfg.scl_speed_hz = 25000;
+    display_cfg.device_address = SSD1315_I2C_ADDR;
+    display_cfg.enable_internal_pullup = false;
+    display_cfg.setup_fn = u8g2_Setup_ssd1315_i2c_128x64_noname_f;
 
-    printf("[startup] before display_init_with_mode\n");
-    display_init_with_mode(
-        CONFIG_I2C_SDA,
-         CONFIG_I2C_SCL,
-         25000,
-         SSD1315_I2C_ADDR,
-         DISPLAY_I2C_MODE);
-    printf("[startup] after display_init_with_mode\n");
+    esp_err_t display_err = i2c_u8g2_init(&s_display, &display_cfg);
+    if (display_err != ESP_OK) {
+        printf("[startup] i2c_u8g2_init failed: %s\n", esp_err_to_name(display_err));
+        return;
+    }
+    s_u8g2 = i2c_u8g2_get_u8g2(&s_display);
+    if (s_u8g2 == NULL) {
+        printf("[startup] i2c_u8g2_get_u8g2 returned NULL\n");
+        return;
+    }
+    printf("[startup] after i2c_u8g2_init\n");
 
     /* Print chip information */
     esp_chip_info_t chip_info;
