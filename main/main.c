@@ -38,14 +38,10 @@
 // This can be 32 bit, int32_t -- helpful for digital output to a i2s->USB teensy3 board
 #define I2S_SAMPLE_TYPE I2S_BITS_PER_SAMPLE_16BIT
 
-//i2c pins
-#define CONFIG_I2C_SDA 15
-#define CONFIG_I2C_SCL 16
-#define SSD1315_I2C_ADDR 0x3C
 // Potentiometer ADC channels
-#define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_3 // GPIO4 on ESP32-S3
+#define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_3 // GPIO6 on ESP32-S3
 // Physical GPIO for the pot (matches ADC_CHANNEL_3 on ESP32-S3)
-#define POT_GPIO_NUM GPIO_NUM_4
+#define POT_GPIO_NUM GPIO_NUM_6
 // Rotary encoder pins
 #define ENCODER_PIN_A GPIO_NUM_40
 #define ENCODER_PIN_B GPIO_NUM_41
@@ -107,7 +103,7 @@ static void encoder_init_task(void *pvParameters)
     esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
     printf("[encoder_init] rotary_encoder_new_with_config returned %d\n", err);
     if (err == ESP_OK && enc) {
-        xTaskCreate(encoder_task, "encoder_task", 2048, enc, 5, NULL);
+        xTaskCreate(encoder_task, "encoder_task", 4096, enc, 5, NULL);
     }
 
     vTaskDelete(NULL);
@@ -153,10 +149,12 @@ static void start_test_tone(uint32_t start) {
     amy_add_event(&e);
 }
 
+/* 
 static void update_tone_effect_from_pot(uint32_t now) {
     // Deprecated: function kept for compatibility but not used when pot_reader_task is active.
     (void)now;
 }
+*/
 
 // Task: read the potentiometer, compute frequency and only trigger AMY update
 // when the frequency change exceeds CHANGE_DELTA_HZ. This acts as the
@@ -237,7 +235,7 @@ static void u8g2_task_function(void *pvParameters)
 
         u8g2_DrawStr(s_u8g2, 0, 12, "AMY Synth READY");
 
-        snprintf(line, sizeof(line), "Heap: %u KB", esp_get_free_heap_size() / 1024);
+    
         u8g2_DrawStr(s_u8g2, 0, 24, line);
 
         snprintf(line, sizeof(line), "I2S: B%d L%d D%d", CONFIG_I2S_BCLK, CONFIG_I2S_LRCLK, CONFIG_I2S_DIN);
@@ -257,10 +255,10 @@ void app_main(void)
 /*
     // I2C recover: Flush Sequence ensure SDA released and toggle SCL 9 times
     printf("[startup] before i2c_recover\n");
-    gpio_set_direction(CONFIG_I2C_SDA, GPIO_MODE_INPUT);
+    gpio_set_direction(CONFIG_I2C_U8G2_SDA_GPIO, GPIO_MODE_INPUT);
 
     gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << CONFIG_I2C_SCL,
+        .pin_bit_mask = 1ULL << CONFIG_I2C_U8G2_SCL_GPIO,
         .mode = GPIO_MODE_OUTPUT_OD,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -269,21 +267,16 @@ void app_main(void)
     gpio_config(&io_conf);
 
     for (int i = 0; i < 9; i++) {
-        gpio_set_level(CONFIG_I2C_SCL, 0);
+        gpio_set_level(CONFIG_I2C_U8G2_SCL_GPIO, 0);
         ets_delay_us(5);
-        gpio_set_level(CONFIG_I2C_SCL, 1);
+        gpio_set_level(CONFIG_I2C_U8G2_SCL_GPIO, 1);
         ets_delay_us(5);
     }
     printf("[startup] after i2c_recover\n");
 */
     printf("[startup] before i2c_u8g2_init\n");
+    // Display configuration is now managed through menuconfig (Kconfig)
     i2c_u8g2_config_t display_cfg = i2c_u8g2_config_default();
-    display_cfg.sda_io_num = CONFIG_I2C_SDA;
-    display_cfg.scl_io_num = CONFIG_I2C_SCL;
-    display_cfg.scl_speed_hz = 25000;
-    display_cfg.device_address = SSD1315_I2C_ADDR;
-    display_cfg.enable_internal_pullup = false;
-    display_cfg.setup_fn = u8g2_Setup_ssd1315_i2c_128x64_noname_f;
 
     esp_err_t display_err = i2c_u8g2_init(&s_display, &display_cfg);
     if (display_err != ESP_OK) {

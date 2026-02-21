@@ -8,6 +8,8 @@ static const char *TAG = "rotary_encoder";
 
 typedef struct rotary_encoder_s {
     pcnt_unit_handle_t pcnt_unit;
+    pcnt_channel_handle_t chan_a;
+    pcnt_channel_handle_t chan_b;
     QueueHandle_t event_queue;
 } rotary_encoder_t;
 
@@ -40,7 +42,8 @@ static esp_err_t rotary_encoder_create_unit(pcnt_unit_handle_t *unit, int32_t lo
     return pcnt_new_unit(&unit_config, unit);
 }
 
-static esp_err_t rotary_encoder_create_channels(pcnt_unit_handle_t unit, gpio_num_t pin_a, gpio_num_t pin_b)
+static esp_err_t rotary_encoder_create_channels(pcnt_unit_handle_t unit, gpio_num_t pin_a, gpio_num_t pin_b,
+                                                 pcnt_channel_handle_t *out_chan_a, pcnt_channel_handle_t *out_chan_b)
 {
     pcnt_channel_handle_t chan_a = NULL;
     pcnt_channel_handle_t chan_b = NULL;
@@ -60,9 +63,11 @@ static esp_err_t rotary_encoder_create_channels(pcnt_unit_handle_t unit, gpio_nu
         ESP_LOGE(TAG, "pcnt_new_channel A failed: %s", esp_err_to_name(ret));
         return ret;
     }
+
     ret = pcnt_new_channel(unit, &chan_b_config, &chan_b);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pcnt_new_channel B failed: %s", esp_err_to_name(ret));
+        pcnt_del_channel(chan_a);
         return ret;
     }
 
@@ -70,29 +75,38 @@ static esp_err_t rotary_encoder_create_channels(pcnt_unit_handle_t unit, gpio_nu
         PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pcnt_channel_set_edge_action A failed: %s", esp_err_to_name(ret));
-        return ret;
+        goto err_cleanup;
     }
+
     ret = pcnt_channel_set_level_action(chan_a,
         PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pcnt_channel_set_level_action A failed: %s", esp_err_to_name(ret));
-        return ret;
+        goto err_cleanup;
     }
 
     ret = pcnt_channel_set_edge_action(chan_b,
         PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pcnt_channel_set_edge_action B failed: %s", esp_err_to_name(ret));
-        return ret;
+        goto err_cleanup;
     }
+
     ret = pcnt_channel_set_level_action(chan_b,
         PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pcnt_channel_set_level_action B failed: %s", esp_err_to_name(ret));
-        return ret;
+        goto err_cleanup;
     }
 
+    *out_chan_a = chan_a;
+    *out_chan_b = chan_b;
     return ESP_OK;
+
+err_cleanup:
+    pcnt_del_channel(chan_a);
+    pcnt_del_channel(chan_b);
+    return ret;
 }
 
 rotary_encoder_config_t rotary_encoder_default_config(gpio_num_t pin_a, gpio_num_t pin_b)
@@ -141,7 +155,8 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
         }
     }
 
-    ret = rotary_encoder_create_channels(encoder->pcnt_unit, config->pin_a, config->pin_b);
+    ret = rotary_encoder_create_channels(encoder->pcnt_unit, config->pin_a, config->pin_b,
+                                         &encoder->chan_a, &encoder->chan_b);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "create_channels failed: %s", esp_err_to_name(ret));
         goto err;
@@ -158,7 +173,7 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
     }
 
     size_t queue_size = config->event_queue_size ? config->event_queue_size : ROTARY_ENCODER_DEFAULT_QUEUE_SIZE;
-    encoder->event_queue = xQueueCreate(queue_size, sizeof(int));
+    encoder->event_queue = xQueueCreate(queue_size, sizeof(int32_t));
     if (!encoder->event_queue) {
         ESP_LOGE(TAG, "failed to create queue");
         goto err;
@@ -218,6 +233,15 @@ esp_err_t rotary_encoder_delete(rotary_encoder_handle_t handle)
     if (handle->pcnt_unit) {
         pcnt_unit_stop(handle->pcnt_unit);
         pcnt_unit_disable(handle->pcnt_unit);
+    }
+    if (handle->chan_a) {
+        pcnt_del_channel(handle->chan_a);
+    }
+    if (handle->chan_b) {
+        pcnt_del_channel(handle->chan_b);
+    }
+    if (handle->pcnt_unit) {
+        pcnt_del_unit(handle->pcnt_unit);
     }
     if (handle->event_queue) {
         vQueueDelete(handle->event_queue);

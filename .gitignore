@@ -42,7 +42,7 @@ flasher_args.json # Generated in build directory
 
 /components/amy/daisy
 /components/amy/experiments
-/components/amy/
+/components/amy/tests
 
 
 
