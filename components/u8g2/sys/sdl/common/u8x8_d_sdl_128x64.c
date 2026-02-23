@@ -7,7 +7,6 @@
 #include "SDL.h"
 #endif
 #include <assert.h>
-#include <stdio.h>
 
 //#define HEIGHT (64)
 //#define WIDTH 128

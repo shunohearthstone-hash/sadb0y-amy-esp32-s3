@@ -23,6 +23,9 @@
 #include "esp_err.h"
 #include "rotary_encoder.h"
 #include <stdlib.h>
+#include "esp_log.h"
+
+static const char *TAG = "main";
 
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
@@ -36,10 +39,10 @@
 #define CONFIG_I2S_LRCLK 9
 #define CONFIG_I2S_DIN 10
 // This can be 32 bit, int32_t -- helpful for digital output to a i2s->USB teensy3 board
-#define I2S_SAMPLE_TYPE I2S_BITS_PER_SAMPLE_16BIT
+
 
 // Potentiometer ADC channels
-#define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_3 // GPIO6 on ESP32-S3
+#define CONFIG_POT_ADC_CHANNEL ADC_CHANNEL_5 // GPIO6 on ESP32-S3 (ADC1_CH5)
 // Physical GPIO for the pot (matches ADC_CHANNEL_3 on ESP32-S3)
 #define POT_GPIO_NUM GPIO_NUM_6
 // Rotary encoder pins
@@ -66,12 +69,15 @@ static volatile float s_last_sent_pot_freq_hz = 0.0f;
 
 static void u8g2_task_function(void *pvParameters);
 
+/* helper from priv_i2c_u8g2 component */
+extern void demo_shapes(u8g2_t *u8g2);
+
 static void pot_log_task(void *pvParameters)
 {
     (void)pvParameters;
     TickType_t last = xTaskGetTickCount();
     for (;;) {
-        printf("ADC: %d, Freq: %.1f Hz\n", s_last_pot_raw, s_last_pot_freq_hz);
+        ESP_LOGI(TAG, "ADC: %d, Freq: %.1f Hz", s_last_pot_raw, s_last_pot_freq_hz);
         vTaskDelayUntil(&last, pdMS_TO_TICKS(500));
     }
 }
@@ -80,14 +86,15 @@ static void pot_log_task(void *pvParameters)
 static void encoder_task(void *pvParameters)
 {
     rotary_encoder_handle_t enc = (rotary_encoder_handle_t)pvParameters;
-    QueueHandle_t q = rotary_encoder_get_event_queue(enc);
-    int32_t watch_point_value;
+    int32_t last_count = 0;
     for (;;) {
-        if (xQueueReceive(q, &watch_point_value, portMAX_DELAY) == pdTRUE) {
-            int32_t count = rotary_encoder_get_count(enc);
-            printf("encoder wp=%ld count=%ld\n", (long)watch_point_value, (long)count);
+        int32_t count = rotary_encoder_get_count(enc);
+        if (count != last_count) {
+            ESP_LOGI(TAG, "encoder count=%ld (delta=%ld)", (long)count, (long)(count - last_count));
+            last_count = count;
             // Example: translate count -> amy_event here (use amy_add_event)
         }
+        vTaskDelay(pdMS_TO_TICKS(20));  // Poll at 50Hz
     }
 }
 
@@ -97,11 +104,11 @@ static void encoder_init_task(void *pvParameters)
     // Delay init to avoid early-boot conflicts (PSRAM, console pins, etc.)
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    printf("[encoder_init] starting after delay\n");
+    ESP_LOGI(TAG, "[encoder_init] starting after delay");
     rotary_encoder_config_t enc_cfg = rotary_encoder_default_config(ENCODER_PIN_A, ENCODER_PIN_B);
     rotary_encoder_handle_t enc = NULL;
     esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
-    printf("[encoder_init] rotary_encoder_new_with_config returned %d\n", err);
+    ESP_LOGI(TAG, "[encoder_init] rotary_encoder_new_with_config returned %d", err);
     if (err == ESP_OK && enc) {
         xTaskCreate(encoder_task, "encoder_task", 4096, enc, 5, NULL);
     }
@@ -235,7 +242,7 @@ static void u8g2_task_function(void *pvParameters)
 
         u8g2_DrawStr(s_u8g2, 0, 12, "AMY Synth READY");
 
-    
+        snprintf(line, sizeof(line), "ADC: %d %.1fHz", s_last_pot_raw, s_last_pot_freq_hz);
         u8g2_DrawStr(s_u8g2, 0, 24, line);
 
         snprintf(line, sizeof(line), "I2S: B%d L%d D%d", CONFIG_I2S_BCLK, CONFIG_I2S_LRCLK, CONFIG_I2S_DIN);
@@ -244,14 +251,17 @@ static void u8g2_task_function(void *pvParameters)
         u8g2_SendBuffer(s_u8g2);
 
         vTaskDelay(pdMS_TO_TICKS(1000));
+
+        // Show demo shapes for 1 second
+      // demo_shapes(s_u8g2);
+        //vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
-
-void app_main(void)
+    void app_main(void)
 {
    
-    printf("Hello world!\n");
+    ESP_LOGI(TAG, "Hello world!");
 /*
     // I2C recover: Flush Sequence ensure SDA released and toggle SCL 9 times
     printf("[startup] before i2c_recover\n");
@@ -274,27 +284,33 @@ void app_main(void)
     }
     printf("[startup] after i2c_recover\n");
 */
-    printf("[startup] before i2c_u8g2_init\n");
+    ESP_LOGI(TAG, "[startup] before i2c_u8g2_init");
     // Display configuration is now managed through menuconfig (Kconfig)
     i2c_u8g2_config_t display_cfg = i2c_u8g2_config_default();
+    ESP_LOGI(TAG, "[startup] display i2c cfg: SDA=%d SCL=%d Freq=%d Addr=0x%02X Timeout=%dms",
+             (int)display_cfg.sda_io_num,
+             (int)display_cfg.scl_io_num,
+             (int)display_cfg.scl_speed_hz,
+             (unsigned int)display_cfg.device_address,
+             (int)display_cfg.timeout_ms);
 
     esp_err_t display_err = i2c_u8g2_init(&s_display, &display_cfg);
     if (display_err != ESP_OK) {
-        printf("[startup] i2c_u8g2_init failed: %s\n", esp_err_to_name(display_err));
+        ESP_LOGE(TAG, "[startup] i2c_u8g2_init failed: %s", esp_err_to_name(display_err));
         return;
     }
     s_u8g2 = i2c_u8g2_get_u8g2(&s_display);
     if (s_u8g2 == NULL) {
-        printf("[startup] i2c_u8g2_get_u8g2 returned NULL\n");
+        ESP_LOGE(TAG, "[startup] i2c_u8g2_get_u8g2 returned NULL");
         return;
     }
-    printf("[startup] after i2c_u8g2_init\n");
+    ESP_LOGI(TAG, "[startup] after i2c_u8g2_init");
 
     /* Print chip information */
     esp_chip_info_t chip_info;
     uint32_t flash_size;
     esp_chip_info(&chip_info);
-    printf("This is %s chip with %d CPU core(s), %s%s%s%s, ",
+    ESP_LOGI(TAG, "This is %s chip with %d CPU core(s), %s%s%s%s, ",
            CONFIG_IDF_TARGET,
            chip_info.cores,
            (chip_info.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi/" : "",
@@ -304,16 +320,16 @@ void app_main(void)
 
     unsigned major_rev = chip_info.revision / 100;
     unsigned minor_rev = chip_info.revision % 100;
-    printf("silicon revision v%d.%d, ", major_rev, minor_rev);
+    ESP_LOGI(TAG, "silicon revision v%d.%d, ", major_rev, minor_rev);
     if(esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
-        printf("Get flash size failed");
+        ESP_LOGE(TAG, "Get flash size failed");
         return;
     }
 
-    printf("%" PRIu32 "MB %s flash\n", flash_size / (uint32_t)(1024 * 1024),
+    ESP_LOGI(TAG, "%" PRIu32 "MB %s flash", flash_size / (uint32_t)(1024 * 1024),
            (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
-    printf("Minimum free heap size: %" PRIu32 " bytes\n", esp_get_minimum_free_heap_size());
+    ESP_LOGI(TAG, "Minimum free heap size: %" PRIu32 " bytes", esp_get_minimum_free_heap_size());
 
     // Configure and start AMY
     amy_config_t amy_cfg = amy_default_config();
@@ -323,10 +339,10 @@ void app_main(void)
     amy_cfg.i2s_dout = CONFIG_I2S_DIN;
     amy_cfg.i2s_din = -1;
     amy_cfg.i2s_mclk = -1;
-    printf("Starting AMY synth engine... (audio=%d, Fs=%d)\n", amy_cfg.audio, AMY_SAMPLE_RATE);
-    printf("[startup] before amy_start\n");
+    ESP_LOGI(TAG, "Starting AMY synth engine... (audio=%d, Fs=%d)", amy_cfg.audio, AMY_SAMPLE_RATE);
+    ESP_LOGI(TAG, "[startup] before amy_start");
     amy_start(amy_cfg);
-    printf("[startup] after amy_start\n");
+    ESP_LOGI(TAG, "[startup] after amy_start");
 
         // Setup rotary encoder
     // Defer rotary encoder initialization to a task to avoid early-boot conflicts
@@ -334,14 +350,14 @@ void app_main(void)
 
 
     // Setup ADC for frequency pot
-    printf("[startup] before setup_pot_adc\n");
+    ESP_LOGI(TAG, "[startup] before setup_pot_adc");
     setup_pot_adc();
-    printf("[startup] after setup_pot_adc\n");
+    ESP_LOGI(TAG, "[startup] after setup_pot_adc");
     
-    int64_t start_time = amy_sysclock();
+    uint32_t start_time = amy_sysclock();
     amy_reset_oscs();
 
-    printf("Scheduling test tone on OSC 0...\n");
+    ESP_LOGI(TAG, "Scheduling test tone on OSC 0...");
     start_test_tone(start_time + 200);
 
     xTaskCreate(
@@ -370,9 +386,10 @@ void app_main(void)
         4,
         NULL);
 
-    printf("Main loop started: pot reader task running\n");
+    ESP_LOGI(TAG, "Main loop started: pot reader task running");
     // Idle loop; pot_reader_task handles all pot->synth updates.
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    while (1) {
+        ESP_LOGI(TAG, "Main loop idle..."); // Log to show we're alive; actual work is in tasks.
+        vTaskDelay(pdMS_TO_TICKS(5000));        }
     }
-}
+

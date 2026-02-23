@@ -2,6 +2,7 @@
 #include "driver/pulse_cnt.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "hal/pcnt_ll.h"
 #include <stdlib.h>
 
 static const char *TAG = "rotary_encoder";
@@ -11,14 +12,14 @@ typedef struct rotary_encoder_s {
     pcnt_channel_handle_t chan_a;
     pcnt_channel_handle_t chan_b;
     QueueHandle_t event_queue;
+    bool pcnt_enabled;
+    bool pcnt_started;
 } rotary_encoder_t;
 
+/* Keep defaults within hardware threshold-point capacity on ESP32-class PCNT */
 static const int32_t default_watch_points[] = {
-    ROTARY_ENCODER_DEFAULT_LOW_LIMIT,
-    -50,
-    0,
-    50,
-    ROTARY_ENCODER_DEFAULT_HIGH_LIMIT,
+    -100,
+    100,
 };
 
 static bool IRAM_ATTR pcnt_on_reach(pcnt_unit_handle_t unit,
@@ -132,13 +133,16 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
     rotary_encoder_t *encoder = calloc(1, sizeof(rotary_encoder_t));
     ESP_RETURN_ON_FALSE(encoder, ESP_ERR_NO_MEM, TAG, "no memory for encoder");
 
+    esp_err_t ret = ESP_FAIL;
+
     /* validate pins */
     if (!GPIO_IS_VALID_GPIO(config->pin_a) || !GPIO_IS_VALID_GPIO(config->pin_b)) {
         ESP_LOGE(TAG, "invalid GPIO pins: A=%d B=%d", config->pin_a, config->pin_b);
+        ret = ESP_ERR_INVALID_ARG;
         goto err;
     }
 
-    esp_err_t ret = rotary_encoder_create_unit(&encoder->pcnt_unit, config->low_limit, config->high_limit);
+    ret = rotary_encoder_create_unit(&encoder->pcnt_unit, config->low_limit, config->high_limit);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "pcnt unit create failed: %s", esp_err_to_name(ret));
         goto err;
@@ -163,10 +167,30 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
     }
 
     if (config->watch_points && config->watch_point_count > 0) {
-        for (size_t i = 0; i < config->watch_point_count; i++) {
-            ret = pcnt_unit_add_watch_point(encoder->pcnt_unit, config->watch_points[i]);
+        size_t max_watch_points = PCNT_LL_THRES_POINT_PER_UNIT;
+        size_t watch_points_to_add = config->watch_point_count;
+        if (watch_points_to_add > max_watch_points) {
+            ESP_LOGW(TAG,
+                     "watch_point_count=%u exceeds hardware capacity=%u, truncating",
+                     (unsigned)watch_points_to_add,
+                     (unsigned)max_watch_points);
+            watch_points_to_add = max_watch_points;
+        }
+
+        for (size_t i = 0; i < watch_points_to_add; i++) {
+            int32_t watch_point = config->watch_points[i];
+            if (watch_point < config->low_limit || watch_point > config->high_limit) {
+                ESP_LOGW(TAG,
+                         "skip out-of-range watch_point=%ld (range=[%ld,%ld])",
+                         (long)watch_point,
+                         (long)config->low_limit,
+                         (long)config->high_limit);
+                continue;
+            }
+
+            ret = pcnt_unit_add_watch_point(encoder->pcnt_unit, watch_point);
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "add_watch_point failed: %s", esp_err_to_name(ret));
+                ESP_LOGE(TAG, "add_watch_point(%ld) failed: %s", (long)watch_point, esp_err_to_name(ret));
                 goto err;
             }
         }
@@ -188,17 +212,19 @@ esp_err_t rotary_encoder_new_with_config(const rotary_encoder_config_t *config, 
 
     ret = pcnt_unit_enable(encoder->pcnt_unit);
     if (ret != ESP_OK) { ESP_LOGE(TAG, "pcnt_unit_enable failed: %s", esp_err_to_name(ret)); goto err; }
+    encoder->pcnt_enabled = true;
     ret = pcnt_unit_clear_count(encoder->pcnt_unit);
     if (ret != ESP_OK) { ESP_LOGE(TAG, "pcnt_unit_clear_count failed: %s", esp_err_to_name(ret)); goto err; }
     ret = pcnt_unit_start(encoder->pcnt_unit);
     if (ret != ESP_OK) { ESP_LOGE(TAG, "pcnt_unit_start failed: %s", esp_err_to_name(ret)); goto err; }
+    encoder->pcnt_started = true;
 
     *out_handle = encoder;
     return ESP_OK;
 
 err:
     rotary_encoder_delete(encoder);
-    return ESP_FAIL;
+    return ret;
 }
 
 esp_err_t rotary_encoder_new(gpio_num_t pin_a, gpio_num_t pin_b, rotary_encoder_handle_t *out_handle)
@@ -231,8 +257,14 @@ esp_err_t rotary_encoder_delete(rotary_encoder_handle_t handle)
     if (!handle) return ESP_ERR_INVALID_ARG;
 
     if (handle->pcnt_unit) {
-        pcnt_unit_stop(handle->pcnt_unit);
-        pcnt_unit_disable(handle->pcnt_unit);
+        if (handle->pcnt_started) {
+            pcnt_unit_stop(handle->pcnt_unit);
+            handle->pcnt_started = false;
+        }
+        if (handle->pcnt_enabled) {
+            pcnt_unit_disable(handle->pcnt_unit);
+            handle->pcnt_enabled = false;
+        }
     }
     if (handle->chan_a) {
         pcnt_del_channel(handle->chan_a);

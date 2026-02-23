@@ -1,17 +1,9 @@
 # works within ubuntu and min-gw (win7) environment
 # win7 exe uploaded on google drive
 
-# requires gcc, eg. on Ubuntu "sudo apt install build-essential"
 CC = gcc
-CFLAGS = -O4 -Wall -Werror
-
-# for debugging ("make clean" after switching)
-#CFLAGS = -g -Wall -Werror
-
-# more portable statically linked linux binary ("make clean" after switching)
-# requires musl-gcc, eg. on Ubuntu "sudo apt install musl-dev"
-#CC = x86_64-linux-musl-gcc
-#LDFLAGS = -static
+CFLAGS = -g -Wall
+#CFLAGS = -O4 -Wall
 
 SRC = main.c bdf_font.c bdf_glyph.c bdf_parser.c bdf_map.c bdf_rle.c bdf_tga.c fd.c bdf_8x8.c bdf_kern.c
 
@@ -21,13 +13,11 @@ ASM = $(SRC:.c=.s)
 .c.s:
 	$(CC) $(CFLAGS) -S -o $@ $<
 
-bdfconv: $(OBJ)
+bdfconv: $(OBJ) $(ASM)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJ) -o bdfconv
 
-asm: $(ASM)
-
 clean:	
-	$(RM) *.o *.s bdfconv
+	-rm $(OBJ) $(ASM) bdfconv
 
 test:	bdfconv
 	./bdfconv 
@@ -203,8 +193,6 @@ falconded9: bdfconv
 	convert bdf.tga -trim u8g2_font_falconded_mr.png
 	./bdfconv -v -f 1 -b 1 -a -m '32-99' falconded.bdf -o u8g2_font_falconded_hr.c  -n u8g2_font_falconded_hr -d ../bdf/helvR12.bdf 
 	convert bdf.tga -trim u8g2_font_falconded_hr.png
-	./bdfconv -v -f 1 -b 2 -a -m '32-65535' falconded.bdf -o u8g2_font_falconded_all.c  -n u8g2_font_falconded_all -d ../bdf/helvR12.bdf 
-	convert bdf.tga -trim u8g2_font_falconded_all.png
 
 
 analecta: bdfconv
@@ -537,47 +525,4 @@ mystery_quest: bdfconv
 	-../otf2bdf/otf2bdf -a -r 72 -p 42 -o mystery-quest.regular.bdf ../ttf/mystery-quest.regular.ttf
 	./bdfconv -v -f 1 -m '32-127' mystery-quest.regular.bdf -o u8g2_font_mystery_quest_42_t.c  -n u8g2_font_mystery_quest_42_t -d ../bdf/helvB18.bdf 
 	convert bdf.tga u8g2_font_mystery_quest_42_t.png
-
-t0: bdfconv
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../bdf/t0-12-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_12_v1.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../tmp/uw-ttyp0-2.1/genbdf/t0-12-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_12_v2.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../bdf/t0-14-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_14_v1.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../tmp/uw-ttyp0-2.1/genbdf/t0-14-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_14_v2.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../bdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_v1.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../tmp/uw-ttyp0-2.1/genbdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_v2.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../tmp/uw-ttyp0-2.1/genbdf/t0-30-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_30_v2.png
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../tmp/uw-ttyp0-2.1/genbdf/t0-40-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_40_v2.png
-
-	./bdfconv -v -g 16 -f 1 -m '254-257' ../tmp/uw-ttyp0-2.1/genbdf/t0-40-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_40_bug_v2.png
-
-	./bdfconv -v -g 32 -f 1 -m '32-701,7838,8364' ../tmp/uw-ttyp0-2.1/genbdf/t0-60-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_60_v2.png
-        
-        
-	./bdfconv -v -g 32 -f 1 -m '32-65535' ../bdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_all_v1.png
-	./bdfconv -v -g 32 -f 1 -m '32-65535' ../tmp/uw-ttyp0-2.1/genbdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_all_v2.png
-        
-        
-	./bdfconv -v -g 32 -f 1 -m '32-159,8224-10239,10496-11359' ../bdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_sym_v1.png
-	./bdfconv -v -g 32 -f 1 -m '32-159,8224-10239,10496-11359' ../tmp/uw-ttyp0-2.1/genbdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_sym_v2.png
-
-	./bdfconv -v -g 32 -f 1 -m '32-159,$$2103,$$2109,$$2126,$$2190-$$21ff,$$23e9-$$23fa,$$2580-$$27bf,$$2b00-$$2bff' ../bdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_sym2_v1.png
-	./bdfconv -v -g 32 -f 1 -m '32-159,$$2103,$$2109,$$2126,$$2190-$$21ff,$$23e9-$$23fa,$$2580-$$27bf,$$2b00-$$2bff' ../tmp/uw-ttyp0-2.1/genbdf/t0-18-uni.bdf -o tmp.c  -n u8g2_font_helvB18_tn -d ../bdf/helvB18.bdf 
-	convert bdf.tga t0_18_sym2_v2.png
-
-        
 

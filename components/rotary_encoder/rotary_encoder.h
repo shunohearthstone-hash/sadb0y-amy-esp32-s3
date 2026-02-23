@@ -11,8 +11,8 @@
 extern "C" {
 #endif
 
-#define ROTARY_ENCODER_DEFAULT_HIGH_LIMIT  50
-#define ROTARY_ENCODER_DEFAULT_LOW_LIMIT  (-50)
+#define ROTARY_ENCODER_DEFAULT_HIGH_LIMIT  1000
+#define ROTARY_ENCODER_DEFAULT_LOW_LIMIT  -1000
 #define ROTARY_ENCODER_DEFAULT_QUEUE_SIZE  10
 #define ROTARY_ENCODER_DEFAULT_GLITCH_NS   5000 // 5 microseconds, suitable for typical mechanical encoders
 
