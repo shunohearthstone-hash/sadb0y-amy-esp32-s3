@@ -23,6 +23,7 @@
 #include "esp_err.h"
 #include "rotary_encoder.h"
 #include <stdlib.h>
+#include <sys/_intsup.h>
 #include "esp_log.h"
 
 static const char *TAG = "main";
@@ -66,6 +67,9 @@ static volatile int s_last_pot_raw = 0;
 static volatile float s_last_pot_freq_hz = 0.0f;
 // Last frequency that was sent to AMY (used for thresholding)
 static volatile float s_last_sent_pot_freq_hz = 0.0f;
+static volatile long last_count = 0; // For encoder count
+static volatile long count = 0; // For encoder count
+
 
 static void u8g2_task_function(void *pvParameters);
 
@@ -86,12 +90,18 @@ static void pot_log_task(void *pvParameters)
 static void encoder_task(void *pvParameters)
 {
     rotary_encoder_handle_t enc = (rotary_encoder_handle_t)pvParameters;
-    int32_t last_count = 0;
+    long prev = last_count;
     for (;;) {
-        int32_t count = rotary_encoder_get_count(enc);
-        if (count != last_count) {
-            ESP_LOGI(TAG, "encoder count=%ld (delta=%ld)", (long)count, (long)(count - last_count));
-            last_count = count;
+        long cur = rotary_encoder_get_count(enc);
+        
+        if (cur != prev) {
+            long delta = cur - prev;
+            ESP_LOGI(TAG,
+                 "encoder count=%ld (delta=%ld)",
+                  (long)cur, (long)(delta));
+            last_count = prev;  // Store the previous count for display
+            count = cur;        // Update current count
+            prev = cur;
             // Example: translate count -> amy_event here (use amy_add_event)
         }
         vTaskDelay(pdMS_TO_TICKS(20));  // Poll at 50Hz
@@ -115,6 +125,9 @@ static void encoder_init_task(void *pvParameters)
 
     vTaskDelete(NULL);
 }
+
+
+
 
 // I2C recover sequence will be performed inline in app_main.
 
@@ -173,13 +186,13 @@ static void pot_reader_task(void *pvParameters)
         int raw = 0;
         if (adc_oneshot_read(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &raw) != ESP_OK) {
             // ADC failed, keep previous readings
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
         // Quick stability check: take a few fast samples and ensure the
         // value isn't wildly fluctuating (which indicates a floating/unconnected pot).
-        bool unstable = false;
+       bool unstable = false;
         for (int i = 0; i < 2; ++i) {
             int tmp = 0;
             if (adc_oneshot_read(pot_adc_handle, CONFIG_POT_ADC_CHANNEL, &tmp) != ESP_OK) {
@@ -202,7 +215,7 @@ static void pot_reader_task(void *pvParameters)
         float freq_hz = 110.0f + (normalized * 770.0f);
 
         // Update last-seen values for logging/UI
-        s_last_pot_raw = raw;
+       s_last_pot_raw = raw;
         s_last_pot_freq_hz = freq_hz;
 
         // Compare against last sent frequency and only trigger AMY when change
@@ -222,7 +235,7 @@ static void pot_reader_task(void *pvParameters)
         }
 
         // Poll at a modest rate
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -234,7 +247,7 @@ static void u8g2_task_function(void *pvParameters)
         return;
     }
 
-    u8g2_SetFont(s_u8g2, u8g2_font_6x10_tf);
+     u8g2_SetFont(s_u8g2, u8g2_font_6x10_tf);
 
     for (;;) {
         char line[32];
@@ -245,12 +258,19 @@ static void u8g2_task_function(void *pvParameters)
         snprintf(line, sizeof(line), "ADC: %d %.1fHz", s_last_pot_raw, s_last_pot_freq_hz);
         u8g2_DrawStr(s_u8g2, 0, 24, line);
 
-        snprintf(line, sizeof(line), "I2S: B%d L%d D%d", CONFIG_I2S_BCLK, CONFIG_I2S_LRCLK, CONFIG_I2S_DIN);
+        snprintf(line, sizeof(line),
+         "Encoder Count: %li",
+          (long)count);
+
         u8g2_DrawStr(s_u8g2, 0, 36, line);
+        snprintf(line, sizeof(line),
+         " Delta: %li",
+           (long)(count - last_count));
+        u8g2_DrawStr(s_u8g2, 0, 48, line);
 
         u8g2_SendBuffer(s_u8g2);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(100));
 
         // Show demo shapes for 1 second
       // demo_shapes(s_u8g2);
@@ -381,7 +401,7 @@ static void u8g2_task_function(void *pvParameters)
     xTaskCreate(
         pot_reader_task,
         "pot_reader_task",
-        2048,
+        6144,
         NULL,
         4,
         NULL);

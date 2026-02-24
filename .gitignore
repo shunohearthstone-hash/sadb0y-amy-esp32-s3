@@ -43,6 +43,7 @@ flasher_args.json # Generated in build directory
 /components/amy/daisy
 /components/amy/experiments
 /components/amy/tests
+components/priv_i2c_u8g2/espressif example
 
 
 
@@ -79,6 +80,8 @@ compile_commands.json
 .cache\*
 .cache/*
 .zed/
+.embedder/
+
 # Windows specific
 Thumbs.db
 ehthumbs.db
@@ -89,7 +92,7 @@ test/
 sounds/
 experiments/
 docs/
-
+components/u8g2_backup_before_ab
 # User-specific configuration files
 .history/
 .vscode/
