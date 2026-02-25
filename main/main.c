@@ -22,6 +22,7 @@
 #include "freertos/event_groups.h"
 #include "esp_err.h"
 #include "rotary_encoder.h"
+#include "sequencer_ui.h"
 #include <stdlib.h>
 #include <sys/_intsup.h>
 #include "esp_log.h"
@@ -49,6 +50,7 @@ static const char *TAG = "main";
 // Rotary encoder pins
 #define ENCODER_PIN_A GPIO_NUM_40
 #define ENCODER_PIN_B GPIO_NUM_41
+#define ENCODER_PIN_BTN GPIO_NUM_16
 
 #define u8g2_task_stack_size (8 * 1024) // 8KB stack for the u8g2 task
 
@@ -70,12 +72,6 @@ static volatile float s_last_sent_pot_freq_hz = 0.0f;
 static volatile long last_count = 0; // For encoder count
 static volatile long count = 0; // For encoder count
 
-
-static void u8g2_task_function(void *pvParameters);
-
-/* helper from priv_i2c_u8g2 component */
-extern void demo_shapes(u8g2_t *u8g2);
-
 static void pot_log_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -91,6 +87,7 @@ static void encoder_task(void *pvParameters)
 {
     rotary_encoder_handle_t enc = (rotary_encoder_handle_t)pvParameters;
     long prev = last_count;
+    int prev_btn_state = 1; // Assuming pull-up, so 1 is unpressed
     for (;;) {
         long cur = rotary_encoder_get_count(enc);
         
@@ -102,8 +99,19 @@ static void encoder_task(void *pvParameters)
             last_count = prev;  // Store the previous count for display
             count = cur;        // Update current count
             prev = cur;
-            // Example: translate count -> amy_event here (use amy_add_event)
+            sequencer_ui_handle_encoder(delta);
         }
+
+        int btn_state = gpio_get_level(ENCODER_PIN_BTN);
+        if (btn_state == 0 && prev_btn_state == 1) {
+            // Button pressed
+            ESP_LOGI(TAG, "Encoder button pressed");
+            sequencer_ui_handle_button();
+            // Simple debounce
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        prev_btn_state = btn_state;
+
         vTaskDelay(pdMS_TO_TICKS(20));  // Poll at 50Hz
     }
 }
@@ -115,6 +123,17 @@ static void encoder_init_task(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     ESP_LOGI(TAG, "[encoder_init] starting after delay");
+    
+    // Initialize button GPIO
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << ENCODER_PIN_BTN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&btn_cfg);
+
     rotary_encoder_config_t enc_cfg = rotary_encoder_default_config(ENCODER_PIN_A, ENCODER_PIN_B);
     rotary_encoder_handle_t enc = NULL;
     esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
@@ -239,45 +258,6 @@ static void pot_reader_task(void *pvParameters)
     }
 }
 
-static void u8g2_task_function(void *pvParameters)
-{
-    (void)pvParameters;
-    if (s_u8g2 == NULL) {
-        vTaskDelete(NULL);
-        return;
-    }
-
-     u8g2_SetFont(s_u8g2, u8g2_font_6x10_tf);
-
-    for (;;) {
-        char line[32];
-        u8g2_ClearBuffer(s_u8g2);
-
-        u8g2_DrawStr(s_u8g2, 0, 12, "AMY Synth READY");
-
-        snprintf(line, sizeof(line), "ADC: %d %.1fHz", s_last_pot_raw, s_last_pot_freq_hz);
-        u8g2_DrawStr(s_u8g2, 0, 24, line);
-
-        snprintf(line, sizeof(line),
-         "Encoder Count: %li",
-          (long)count);
-
-        u8g2_DrawStr(s_u8g2, 0, 36, line);
-        snprintf(line, sizeof(line),
-         " Delta: %li",
-           (long)(count - last_count));
-        u8g2_DrawStr(s_u8g2, 0, 48, line);
-
-        u8g2_SendBuffer(s_u8g2);
-
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        // Show demo shapes for 1 second
-      // demo_shapes(s_u8g2);
-        //vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
     void app_main(void)
 {
    
@@ -380,13 +360,8 @@ static void u8g2_task_function(void *pvParameters)
     ESP_LOGI(TAG, "Scheduling test tone on OSC 0...");
     start_test_tone(start_time + 200);
 
-    xTaskCreate(
-        u8g2_task_function,
-         "u8g2_task_function",
-         u8g2_task_stack_size,
-         NULL,
-         5,
-         NULL);
+    sequencer_ui_init(s_u8g2);
+
     xTaskCreate(
         pot_log_task,
          "pot_log_task",
