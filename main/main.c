@@ -24,6 +24,7 @@
 #include "rotary_encoder.h"
 #include "sequencer_ui.h"
 #include "usb_audio.h"
+#include "esp_timer.h"
 #include <stdlib.h>
 #include <sys/_intsup.h>
 #include "esp_log.h"
@@ -71,6 +72,16 @@ static volatile float s_last_pot_freq_hz = 0.0f;
 static volatile float s_last_sent_pot_freq_hz = 0.0f;
 static volatile long last_count = 0; // For encoder count
 static volatile long count = 0; // For encoder count
+static volatile uint32_t s_last_seq_tick = 0;
+static volatile uint32_t s_seq_tick_hook_count = 0;
+static volatile uint32_t s_render_block_count = 0;
+static volatile uint32_t s_last_render_sysclock_ms = 0;
+
+static void main_sequencer_tick_hook(uint32_t tick_count)
+{
+    s_last_seq_tick = tick_count;
+    s_seq_tick_hook_count++;
+}
 
 static void pot_log_task(void *pvParameters)
 {
@@ -81,7 +92,36 @@ static void pot_log_task(void *pvParameters)
         vTaskDelayUntil(&last, pdMS_TO_TICKS(500));
     }
 }
+static void amy_usb_render_task(void *arg) {
+    (void)arg;
+    const uint64_t block_us = ((uint64_t)AMY_BLOCK_SIZE * 1000000ULL) / (uint64_t)AMY_SAMPLE_RATE;
+    uint64_t next_deadline_us = (uint64_t)esp_timer_get_time();
+    while (1) {
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        if (now_us < next_deadline_us) {
+            uint64_t wait_us = next_deadline_us - now_us;
+            TickType_t wait_ticks = pdMS_TO_TICKS((uint32_t)(wait_us / 1000ULL));
+            if (wait_ticks > 0) {
+                vTaskDelay(wait_ticks);
+            } else {
+                taskYIELD();
+            }
+            continue;
+        }
 
+        int16_t *block = amy_update();           // synthesizes everything / advances AMY sample clock
+        if (block) {
+            s_render_block_count++;
+            s_last_render_sysclock_ms = amy_sysclock();
+            esp_err_t write_err = usb_audio_write_stereo(block, AMY_BLOCK_SIZE);
+            if (write_err == ESP_ERR_NO_MEM) {
+                // USB ring buffer is full; briefly back off and try again.
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+        next_deadline_us += block_us;
+    }
+}
 //encoder
 static void encoder_task(void *pvParameters)
 {
@@ -241,26 +281,6 @@ static void pot_reader_task(void *pvParameters)
     }
 }
 
-static void amy_usb_audio_task(void *arg)
-{
-    (void)arg;
-
-    while (1) {
-        // amy_update() advances the synth by one block and returns
-        // pointer to interleaved stereo int16_t samples (L R L R ...)
-        int16_t *block = amy_simple_fill_buffer();
-
-        if (block != NULL) {
-            // Push directly into our USB ring buffer
-            // (usb_audio_write_stereo handles underrun safely)
-            usb_audio_write_stereo(block, AMY_BLOCK_SIZE);
-        }
-
-        // Yield / keep real-time friendly
-        // (AMY is designed to be called at exactly sample_rate / block_size)
-        vTaskDelay(1);   // usually ~10–11 ms @ 48 kHz / 512
-    }
-}
 
     void app_main(void)
 {
@@ -337,17 +357,32 @@ static void amy_usb_audio_task(void *arg)
 
     // Configure and start AMY
     amy_config_t amy_cfg = amy_default_config();
-    amy_cfg.audio = AMY_AUDIO_IS_USB_GADGET; //changed from audio is none
+    amy_cfg.audio = AMY_AUDIO_IS_NONE; //changed from audio is none
+    amy_cfg.amy_external_sequencer_hook = main_sequencer_tick_hook;
     ESP_LOGI(TAG, "Starting AMY synth engine... (audio=%d, Fs=%d)", amy_cfg.audio, AMY_SAMPLE_RATE);
     ESP_LOGI(TAG, "[startup] before amy_start");
     amy_start(amy_cfg);
-    ESP_LOGI(TAG, "[startup] after amy_start");
-
+    
     // Our USB Audio (must be after TinyUSB init)
     ESP_ERROR_CHECK(usb_audio_init());
 
-    // Launch the rendering task
-    xTaskCreate(amy_usb_audio_task, "amy_usb_audio", 4096, NULL, 5, NULL);
+    sequencer_ui_init(s_u8g2);
+    ESP_LOGI(TAG, "[startup] after amy_start");
+    
+    TaskHandle_t amy_render_task_handle = NULL;
+    BaseType_t render_task_ok;
+#if CONFIG_FREERTOS_UNICORE
+    render_task_ok = xTaskCreatePinnedToCore(amy_usb_render_task, "amy_render", 8192, NULL, 7, &amy_render_task_handle, 0);
+#else
+    render_task_ok = xTaskCreatePinnedToCore(amy_usb_render_task, "amy_render", 8192, NULL, 7, &amy_render_task_handle, 1);
+#endif
+    if (render_task_ok != pdPASS) {
+        ESP_LOGW(TAG, "amy_render pinned task create failed (%ld), retrying unpinned", (long)render_task_ok);
+        render_task_ok = xTaskCreate(amy_usb_render_task, "amy_render", 8192, NULL, 7, &amy_render_task_handle);
+    }
+    if (render_task_ok != pdPASS) {
+        ESP_LOGE(TAG, "amy_render task create failed (%ld)", (long)render_task_ok);
+    }
 
     ESP_LOGI(TAG, "AMY + USB Audio ready (48 kHz stereo to PC)");
 
@@ -365,7 +400,7 @@ static void amy_usb_audio_task(void *arg)
     ESP_LOGI(TAG, "Scheduling test tone on OSC 0...");
    // start_test_tone(start_time + 200);
 
-    sequencer_ui_init(s_u8g2);
+    
 
     xTaskCreate(
         pot_log_task,
@@ -389,7 +424,9 @@ static void amy_usb_audio_task(void *arg)
     ESP_LOGI(TAG, "Main loop started: pot reader task running");
     // Idle loop; pot_reader_task handles all pot->synth updates.
     while (1) {
-        ESP_LOGI(TAG, "Main loop idle..."); // Log to show we're alive; actual work is in tasks.
+        ESP_LOGI(TAG,
+                 "Main loop idle... seq_tick=%" PRIu32 " tick_hook_calls=%" PRIu32 " render_blocks=%" PRIu32 " render_sysclock_ms=%" PRIu32,
+                 s_last_seq_tick, s_seq_tick_hook_count, s_render_block_count, s_last_render_sysclock_ms);
         vTaskDelay(pdMS_TO_TICKS(5000));        }
     }
 

@@ -15,5 +15,6 @@ uint8_t sequencer_add_event(amy_event *e);
 void sequencer_midi_clock_tick();
 void sequencer_midi_start();
 void sequencer_midi_stop();
+void sequencer_force_internal_clock();
 
 #endif

@@ -1,18 +1,19 @@
 #include "sequencer_ui.h"
 #include "priv_u8g2_seq.h"
+#include "sequencer_core.h"
+#include "amy.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "amy.h"
-#include "sequencer.h"
 #include "esp_log.h"
 
 static const char *TAG = "sequencer_ui";
 
-static priv_u8g2_seq_state_t seq_state = {
+sequencer_ui_state_t seq_state = {
+    .grid = {{0}},
     .bpm = 120,
     .current_pattern = 1,
     .current_step = 0,
-    .playing = true, // Start playing by default
+    .playing = true,
     .selected_track = 0,
     .selected_step = 0,
     .edit_mode = true,
@@ -20,38 +21,12 @@ static priv_u8g2_seq_state_t seq_state = {
 
 static u8g2_t *s_u8g2 = NULL;
 
-static void sync_sequencer(void) {
-    for (int track = 0; track < SEQ_TRACKS; track++) {
-        for (int step = 0; step < SEQ_STEPS; step++) {
-            amy_event e = amy_default_event();
-            e.sequence[SEQUENCE_TAG] = track * SEQ_STEPS + step;
-            
-            if (seq_state.playing && seq_state.grid[track][step]) {
-                e.osc = track;
-                e.wave = SINE;
-                e.velocity = 1.0f;
-                
-                // Different frequencies for different tracks
-                if (track == 0) e.freq_coefs[0] = 60.0f;       // BD
-                else if (track == 1) e.freq_coefs[0] = 200.0f; // SD
-                else if (track == 2) e.freq_coefs[0] = 800.0f; // CH
-                else if (track == 3) e.freq_coefs[0] = 400.0f; // OH
-                
-                // Short envelope for percussive sound
-                e.eg_type[0] = ENVELOPE_NORMAL;
-                e.eg0_times[0] = 10; // 10ms attack
-                e.eg0_values[0] = 1.0f;
-                e.eg0_times[1] = 100; // 100ms decay
-                e.eg0_values[1] = 0.0f;
-                
-                e.sequence[SEQUENCE_TICK] = step * 12;
-                e.sequence[SEQUENCE_PERIOD] = 192;
-                amy_add_event(&e);
-            } else {
-                // Clear the event
-                e.sequence[SEQUENCE_TICK] = 0;
-                e.sequence[SEQUENCE_PERIOD] = 0;
-                sequencer_add_event(&e); // Call directly to avoid playing it immediately
+// Copy UI grid → core grid (called once at init and after every edit)
+static void sync_grid_to_core(void) {
+    for (int t = 0; t < SEQ_TRACKS; t++) {
+        for (int s = 0; s < SEQ_STEPS; s++) {
+            if (seq_state.grid[t][s]) {
+                sequencer_core_set_step(t, s, true);
             }
         }
     }
@@ -60,15 +35,12 @@ static void sync_sequencer(void) {
 static void sequencer_ui_task(void *pvParameters) {
     (void)pvParameters;
     TickType_t last_wake_time = xTaskGetTickCount();
-    const TickType_t delay = pdMS_TO_TICKS(50); // 20Hz refresh rate
+    const TickType_t delay = pdMS_TO_TICKS(50); // 20 Hz UI refresh
 
     for (;;) {
-        if (seq_state.playing) {
-            // 1 step = 12 ticks. 16 steps = 192 ticks.
-            seq_state.current_step = (sequencer_ticks() / 12) % SEQ_STEPS;
-        }
+        seq_state.current_step = sequencer_core_get_current_step();
         if (s_u8g2) {
-            priv_u8g2_seq_draw_frame(s_u8g2, &seq_state);
+            priv_u8g2_seq_draw_frame(s_u8g2, (priv_u8g2_seq_state_t*)&seq_state);   // unchanged — still uses seq_state.grid
         }
         vTaskDelayUntil(&last_wake_time, delay);
     }
@@ -76,81 +48,81 @@ static void sequencer_ui_task(void *pvParameters) {
 
 void sequencer_ui_init(u8g2_t *u8g2) {
     s_u8g2 = u8g2;
-    
-    // Initialize some default pattern
-    seq_state.grid[0][0] = true;
-    seq_state.grid[0][4] = true;
-    seq_state.grid[0][8] = true;
-    seq_state.grid[0][12] = true;
-    
-    seq_state.grid[1][4] = true;
-    seq_state.grid[1][12] = true;
+    seq_state.playing = true;
 
-    // Set initial BPM
-    amy_event e = amy_default_event();
-    e.tempo = seq_state.bpm;
-    amy_add_event(&e);
+    // Default pattern (same as before)
+    seq_state.grid[0][0] = seq_state.grid[0][4] = seq_state.grid[0][8] = seq_state.grid[0][12] = true;
+    seq_state.grid[1][4] = seq_state.grid[1][12] = true;
 
-    // Reset sequencer tick count to start from step 0
-    amy_global.sequencer_tick_count = 0xFFFFFFFF;
-    sync_sequencer();
+    // Start the real-time core
+    sequencer_core_init();
 
-    xTaskCreate(sequencer_ui_task, "sequencer_ui_task", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Sequencer UI initialized");
+    // Sync initial pattern to core
+    sync_grid_to_core();
+
+    // No transport button yet: force loop-play at boot.
+    sequencer_core_set_playing(true);
+
+    // Start UI task
+    xTaskCreate(sequencer_ui_task, "seq_ui", 4096, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "Sequencer UI + Core initialized");
 }
 
 void sequencer_ui_handle_encoder(long delta) {
     if (delta == 0) return;
 
     if (seq_state.edit_mode) {
-        // Move selection
+        // Move selection (wrap around tracks & steps)
         int new_step = (int)seq_state.selected_step + delta;
         if (new_step < 0) {
-            new_step = SEQ_STEPS - 1;
-            seq_state.selected_track = (seq_state.selected_track - 1 + SEQ_TRACKS) % SEQ_TRACKS;
-        } else if (new_step >= SEQ_STEPS) {
+            new_step = 15;
+            seq_state.selected_track = (seq_state.selected_track + 3) % 4;
+        } else if (new_step > 15) {
             new_step = 0;
-            seq_state.selected_track = (seq_state.selected_track + 1) % SEQ_TRACKS;
+            seq_state.selected_track = (seq_state.selected_track + 1) % 4;
         }
         seq_state.selected_step = new_step;
     } else {
-        // Change BPM or something else
-        int new_bpm = (int)seq_state.bpm + delta;
-        sequencer_ui_set_bpm(new_bpm);
+        // BPM change
+        sequencer_ui_set_bpm(seq_state.bpm + delta);
     }
 }
 
 void sequencer_ui_handle_button(void) {
     if (seq_state.edit_mode) {
-        // Toggle step
-        seq_state.grid[seq_state.selected_track][seq_state.selected_step] = !seq_state.grid[seq_state.selected_track][seq_state.selected_step];
-        
-        sync_sequencer();
-        
-        // Post AMY event for immediate feedback
-        if (seq_state.grid[seq_state.selected_track][seq_state.selected_step]) {
+        // Toggle step in UI grid
+        uint8_t t = seq_state.selected_track;
+        uint8_t s = seq_state.selected_step;
+        seq_state.grid[t][s] = !seq_state.grid[t][s];
+
+        // Immediately update core (this is the only place we sync)
+        if (seq_state.grid[t][s]) {
+            sequencer_core_set_step(t, s, true);   // turn ON
+        } else {
+            sequencer_core_set_step(t, s, false);  // turn OFF
+        }
+
+        // Immediate audio feedback (your original code — kept)
+        if (seq_state.grid[t][s]) {
             amy_event e = amy_default_event();
             e.time = amy_sysclock();
-            e.osc = seq_state.selected_track; // Map track to osc
-            e.wave = SINE; // Just a placeholder
+            e.osc = t;
+            e.wave = SINE;
             e.velocity = 1.0f;
-            if (seq_state.selected_track == 0) e.freq_coefs[0] = 60.0f;
-            else if (seq_state.selected_track == 1) e.freq_coefs[0] = 200.0f;
-            else if (seq_state.selected_track == 2) e.freq_coefs[0] = 800.0f;
-            else if (seq_state.selected_track == 3) e.freq_coefs[0] = 400.0f;
+            if (t == 0) e.freq_coefs[0] = 60.0f;
+            else if (t == 1) e.freq_coefs[0] = 200.0f;
+            else if (t == 2) e.freq_coefs[0] = 800.0f;
+            else if (t == 3) e.freq_coefs[0] = 400.0f;
             e.eg_type[0] = ENVELOPE_NORMAL;
-            e.eg0_times[0] = 10; e.eg0_values[0] = 1.0f;
+            e.eg0_times[0] = 10;  e.eg0_values[0] = 1.0f;
             e.eg0_times[1] = 100; e.eg0_values[1] = 0.0f;
-            e.bp_is_set[0] = 1;
             amy_add_event(&e);
         }
     } else {
         // Toggle play/pause
         seq_state.playing = !seq_state.playing;
-        if (seq_state.playing) {
-            amy_global.sequencer_tick_count = 0xFFFFFFFF;
-        }
-        sync_sequencer();
+        sequencer_core_set_playing(seq_state.playing);
     }
 }
 
@@ -158,8 +130,5 @@ void sequencer_ui_set_bpm(uint16_t bpm) {
     if (bpm < 40) bpm = 40;
     if (bpm > 300) bpm = 300;
     seq_state.bpm = bpm;
-    
-    amy_event e = amy_default_event();
-    e.tempo = bpm;
-    amy_add_event(&e);
+    sequencer_core_set_bpm(bpm);
 }

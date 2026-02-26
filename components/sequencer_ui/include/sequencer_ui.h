@@ -1,36 +1,23 @@
 #pragma once
+#include <stdint.h>
+#include <stdbool.h>
 
-#include "u8g2.h"
+#include "u8g2.h"   // for the draw function
+#include "priv_u8g2_seq.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/**
- * @brief Initialize the sequencer UI task.
- * 
- * @param u8g2 Pointer to the initialized u8g2 instance.
- */
+typedef priv_u8g2_seq_state_t sequencer_ui_state_t;
+
 void sequencer_ui_init(u8g2_t *u8g2);
-
-/**
- * @brief Handle encoder input for the sequencer UI.
- * 
- * @param delta The change in encoder count.
- */
 void sequencer_ui_handle_encoder(long delta);
-
-/**
- * @brief Handle button press for the sequencer UI.
- */
 void sequencer_ui_handle_button(void);
-
-/**
- * @brief Update the sequencer BPM.
- * 
- * @param bpm The new BPM value.
- */
 void sequencer_ui_set_bpm(uint16_t bpm);
+
+// For priv_u8g2_seq_draw_frame to stay 100% unchanged
+extern sequencer_ui_state_t seq_state;
 
 #ifdef __cplusplus
 }
