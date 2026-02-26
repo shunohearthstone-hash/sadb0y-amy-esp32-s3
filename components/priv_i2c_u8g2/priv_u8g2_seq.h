@@ -13,7 +13,7 @@ extern "C" {
 
 typedef struct {
     bool grid[SEQ_TRACKS][SEQ_STEPS];
-    uint8_t bpm;
+    uint16_t bpm;
     uint8_t current_pattern;
     uint8_t current_step;      // 0-15
     bool playing;

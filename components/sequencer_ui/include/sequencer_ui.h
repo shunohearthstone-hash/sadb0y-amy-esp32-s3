@@ -25,6 +25,13 @@ void sequencer_ui_handle_encoder(long delta);
  */
 void sequencer_ui_handle_button(void);
 
+/**
+ * @brief Update the sequencer BPM.
+ * 
+ * @param bpm The new BPM value.
+ */
+void sequencer_ui_set_bpm(uint16_t bpm);
+
 #ifdef __cplusplus
 }
 #endif

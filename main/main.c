@@ -23,6 +23,7 @@
 #include "esp_err.h"
 #include "rotary_encoder.h"
 #include "sequencer_ui.h"
+#include "usb_audio.h"
 #include <stdlib.h>
 #include <sys/_intsup.h>
 #include "esp_log.h"
@@ -34,7 +35,6 @@ static const char *TAG = "main";
 #include "rom/ets_sys.h"
 #include "esp_adc/adc_oneshot.h"
 #include "soc/gpio_num.h"
-#include <math.h>
 /*----------------------------------------------GPIO/MACROS-----------------------------------------------------------*/
 //i2s pins
 #define CONFIG_I2S_BCLK 11 // 25
@@ -154,9 +154,7 @@ static void encoder_init_task(void *pvParameters)
 // AMY synth states
 extern struct state amy_global;
 
-static void esp_show_debug(uint8_t t) {
-    (void)t;
-}
+
 
 static amy_err_t setup_pot_adc(void) {
     adc_oneshot_unit_init_cfg_t init_cfg = {
@@ -178,15 +176,7 @@ static amy_err_t setup_pot_adc(void) {
     return AMY_OK;
 }
 
-static void start_test_tone(uint32_t start) {
-    amy_event e = amy_default_event();
-    e.time = start;
-    e.osc = 0;
-    e.wave = SINE;
-    e.velocity = 0.7f;
-    e.freq_coefs[0] = 220.0f;
-    amy_add_event(&e);
-}
+
 
 /* 
 static void update_tone_effect_from_pot(uint32_t now) {
@@ -231,30 +221,44 @@ static void pot_reader_task(void *pvParameters)
         }
 
         float normalized = (float)raw / 4095.0f;
-        float freq_hz = 110.0f + (normalized * 770.0f);
+        uint16_t bpm = 80 + (uint16_t)(normalized * 60.0f);
 
         // Update last-seen values for logging/UI
-       s_last_pot_raw = raw;
-        s_last_pot_freq_hz = freq_hz;
+        s_last_pot_raw = raw;
+        s_last_pot_freq_hz = bpm; // Reusing this variable for logging
 
         // Compare against last sent frequency and only trigger AMY when change
         // exceeds the configured threshold (CHANGE_DELTA_HZ)
-        if (fabsf(freq_hz - s_last_sent_pot_freq_hz) > CHANGE_DELTA_HZ) {
-            // Prepare and send the AMY event at current sysclock.
-            // Use a static event to avoid allocating a large struct on the task stack.
-            static amy_event e;
-            e = amy_default_event();
-            e.time = amy_sysclock();
-            e.osc = 0;
-            e.freq_coefs[0] = freq_hz;
-            amy_add_event(&e);
+        if (abs(bpm - (uint16_t)s_last_sent_pot_freq_hz) > 0) {
+            sequencer_ui_set_bpm(bpm);
 
             // Remember the last value we sent
-            s_last_sent_pot_freq_hz = freq_hz;
+            s_last_sent_pot_freq_hz = bpm;
         }
 
         // Poll at a modest rate
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+static void amy_usb_audio_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+        // amy_update() advances the synth by one block and returns
+        // pointer to interleaved stereo int16_t samples (L R L R ...)
+        int16_t *block = amy_simple_fill_buffer();
+
+        if (block != NULL) {
+            // Push directly into our USB ring buffer
+            // (usb_audio_write_stereo handles underrun safely)
+            usb_audio_write_stereo(block, AMY_BLOCK_SIZE);
+        }
+
+        // Yield / keep real-time friendly
+        // (AMY is designed to be called at exactly sample_rate / block_size)
+        vTaskDelay(1);   // usually ~10–11 ms @ 48 kHz / 512
     }
 }
 
@@ -333,16 +337,19 @@ static void pot_reader_task(void *pvParameters)
 
     // Configure and start AMY
     amy_config_t amy_cfg = amy_default_config();
-    amy_cfg.audio = AMY_AUDIO_IS_I2S;
-    amy_cfg.i2s_bclk = CONFIG_I2S_BCLK;
-    amy_cfg.i2s_lrc = CONFIG_I2S_LRCLK;
-    amy_cfg.i2s_dout = CONFIG_I2S_DIN;
-    amy_cfg.i2s_din = -1;
-    amy_cfg.i2s_mclk = -1;
+    amy_cfg.audio = AMY_AUDIO_IS_USB_GADGET; //changed from audio is none
     ESP_LOGI(TAG, "Starting AMY synth engine... (audio=%d, Fs=%d)", amy_cfg.audio, AMY_SAMPLE_RATE);
     ESP_LOGI(TAG, "[startup] before amy_start");
     amy_start(amy_cfg);
     ESP_LOGI(TAG, "[startup] after amy_start");
+
+    // Our USB Audio (must be after TinyUSB init)
+    ESP_ERROR_CHECK(usb_audio_init());
+
+    // Launch the rendering task
+    xTaskCreate(amy_usb_audio_task, "amy_usb_audio", 4096, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "AMY + USB Audio ready (48 kHz stereo to PC)");
 
         // Setup rotary encoder
     // Defer rotary encoder initialization to a task to avoid early-boot conflicts
@@ -354,11 +361,9 @@ static void pot_reader_task(void *pvParameters)
     setup_pot_adc();
     ESP_LOGI(TAG, "[startup] after setup_pot_adc");
     
-    uint32_t start_time = amy_sysclock();
-    amy_reset_oscs();
-
+   
     ESP_LOGI(TAG, "Scheduling test tone on OSC 0...");
-    start_test_tone(start_time + 200);
+   // start_test_tone(start_time + 200);
 
     sequencer_ui_init(s_u8g2);
 

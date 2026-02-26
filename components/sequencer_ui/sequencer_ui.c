@@ -43,7 +43,6 @@ static void sync_sequencer(void) {
                 e.eg0_values[0] = 1.0f;
                 e.eg0_times[1] = 100; // 100ms decay
                 e.eg0_values[1] = 0.0f;
-                e.bp_is_set[0] = 1;
                 
                 e.sequence[SEQUENCE_TICK] = step * 12;
                 e.sequence[SEQUENCE_PERIOD] = 192;

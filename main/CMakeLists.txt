@@ -1,7 +1,6 @@
 idf_component_register(SRCS
     "main.c"
-    "sequencer_ui.c"
-    PRIV_REQUIRES spi_flash esp_driver_i2s esp_driver_i2c esp_adc esp_driver_uart esp_timer priv_i2c_u8g2 rotary_encoder u8g2
+    PRIV_REQUIRES spi_flash esp_driver_i2s esp_driver_i2c esp_adc esp_driver_uart esp_timer priv_i2c_u8g2 rotary_encoder u8g2 sequencer_ui usb_audio
     REQUIRES amy 
     INCLUDE_DIRS "."
 )
