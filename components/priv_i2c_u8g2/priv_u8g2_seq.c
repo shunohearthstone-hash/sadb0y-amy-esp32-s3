@@ -31,9 +31,10 @@ void priv_u8g2_seq_draw_frame(u8g2_t *u8g2, const priv_u8g2_seq_state_t *state) 
     const int col_w = 6;
     const int cell_size = 5;
     const int row_h = 10; // Increased row height for 4 tracks to fill more space
+    const int grid_top = 20; // moved down a couple rows to add space under header
 
     for (int t = 0; t < SEQ_TRACKS; t++) {
-        int y = 15 + t * row_h;
+        int y = grid_top + t * row_h;
 
         // Track label
         u8g2_DrawStr(u8g2, 2, y + 6, track_labels[t]);
@@ -53,20 +54,20 @@ void priv_u8g2_seq_draw_frame(u8g2_t *u8g2, const priv_u8g2_seq_state_t *state) 
     // Bar separators (every 4 steps)
     for (int b = 1; b < 4; b++) {
         int x = grid_x + (b * 4) * col_w - 1;
-        u8g2_DrawVLine(u8g2, x, 12, SEQ_TRACKS * row_h + 2);
+        u8g2_DrawVLine(u8g2, x, grid_top - 3, SEQ_TRACKS * row_h + 2);
     }
 
     // === PLAYHEAD (XOR highlight) ===
     if (state->playing || state->edit_mode) {
         int ph_x = grid_x + state->current_step * col_w - 1;
         u8g2_SetDrawColor(u8g2, 2);           // XOR = invert whatever is there
-        u8g2_DrawBox(u8g2, ph_x, 12, col_w + 1, SEQ_TRACKS * row_h + 2);
+        u8g2_DrawBox(u8g2, ph_x, grid_top - 3, col_w + 1, SEQ_TRACKS * row_h + 2);
         u8g2_SetDrawColor(u8g2, 1);           // back to normal
     }
 
     // === SELECTION CURSOR (blinking or solid) ===
     if (state->edit_mode) {
-        int sel_y = 15 + state->selected_track * row_h - 1;
+        int sel_y = grid_top + state->selected_track * row_h - 1;
         int sel_x = grid_x + state->selected_step * col_w;
         u8g2_DrawRFrame(u8g2, sel_x, sel_y, cell_size + 2, cell_size + 2, 1); // rounded for visibility
     }

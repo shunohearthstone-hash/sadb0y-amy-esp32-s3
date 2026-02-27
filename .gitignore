@@ -92,6 +92,7 @@ test/
 sounds/
 experiments/
 docs/
+ignored_docs
 components/u8g2_backup_before_ab
 # User-specific configuration files
 .history/

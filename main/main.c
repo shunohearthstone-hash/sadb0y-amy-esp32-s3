@@ -179,7 +179,10 @@ static void encoder_init_task(void *pvParameters)
     esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
     ESP_LOGI(TAG, "[encoder_init] rotary_encoder_new_with_config returned %d", err);
     if (err == ESP_OK && enc) {
-        xTaskCreate(encoder_task, "encoder_task", 4096, enc, 5, NULL);
+        // Increase encoder task stack to avoid stack overflow when handling
+        // amy_event-heavy operations (sequencer toggles create several
+        // amy_event/delta conversions on the stack).
+        xTaskCreate(encoder_task, "encoder_task", 8192, enc, 5, NULL);
     }
 
     vTaskDelete(NULL);
