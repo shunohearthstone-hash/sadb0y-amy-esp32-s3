@@ -16,3 +16,4 @@ dependencies:
   #   public: true
   # # For local components:
   espressif/usb_device_uac: '*'
+  espressif/button: =*
