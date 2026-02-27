@@ -44,7 +44,7 @@ flasher_args.json # Generated in build directory
 /components/amy/experiments
 /components/amy/tests
 components/priv_i2c_u8g2/espressif example
-
+/components/amy/valgrind.supressions
 
 
 
