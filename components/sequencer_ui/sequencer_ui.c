@@ -126,6 +126,12 @@ void sequencer_ui_handle_button(void) {
     }
 }
 
+void sequencer_ui_toggle_playing(void) {
+    seq_state.playing = !seq_state.playing;
+    sequencer_core_set_playing(seq_state.playing);
+    ESP_LOGI(TAG, "Playback %s", seq_state.playing ? "started" : "stopped");
+}
+
 void sequencer_ui_set_bpm(uint16_t bpm) {
     if (bpm < 40) bpm = 40;
     if (bpm > 300) bpm = 300;

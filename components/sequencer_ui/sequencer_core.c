@@ -15,6 +15,9 @@ extern uint32_t sequencer_ticks(void);
 #define SEQ_MIN_BPM 40
 #define SEQ_MAX_BPM 300
 
+// GM drum MIDI notes per track: hat, kick, snare, cowbell
+static const uint8_t track_midi_notes[SEQ_TRACKS] = {42, 35, 38, 56};
+
 static bool playing = true;
 static uint16_t bpm = 120;
 static bool grid[SEQ_TRACKS][SEQ_STEPS] = {0};
@@ -58,28 +61,18 @@ static void sequencer_emit_step_event(uint8_t track, uint8_t step) {
     }
 
     amy_event e = amy_default_event();
-    e.osc = track;
-    e.wave = SINE;
+    e.synth = 10;
+    e.synth_flags = _SYNTH_FLAGS_MIDI_DRUMS |_SYNTH_FLAGS_IGNORE_NOTE_OFFS; // 3, flag(0x01) + (0x02) = MIDI drums + ignore note offs. Defined in amy.h
+    e.midi_note = track_midi_notes[track];
     e.velocity = 1.0f;
-
-    if (track == 0) e.freq_coefs[0] = 60.0f;
-    else if (track == 1) e.freq_coefs[0] = 200.0f;
-    else if (track == 2) e.freq_coefs[0] = 800.0f;
-    else e.freq_coefs[0] = 400.0f;
-
-    e.eg_type[0] = ENVELOPE_NORMAL;
-    e.eg0_times[0] = 10;
-    e.eg0_values[0] = 1.0f;
-    e.eg0_times[1] = 100;
-    e.eg0_values[1] = 0.0f;
-
     e.sequence[SEQUENCE_TAG] = tag_on;
     e.sequence[SEQUENCE_TICK] = tick_on;
     e.sequence[SEQUENCE_PERIOD] = SEQ_BAR_TICKS;
     amy_add_event(&e);
 
     e = amy_default_event();
-    e.osc = track;
+    e.synth = 10;
+    e.midi_note = track_midi_notes[track];
     e.velocity = 0.0f;
     e.sequence[SEQUENCE_TAG] = tag_off;
     e.sequence[SEQUENCE_TICK] = tick_off;

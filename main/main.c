@@ -29,13 +29,14 @@
 #include <sys/_intsup.h>
 #include "esp_log.h"
 
-static const char *TAG = "main";
+static const char *TAG = "main"; // For ESP_LOG and related logs in this file
 
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "rom/ets_sys.h"
 #include "esp_adc/adc_oneshot.h"
 #include "soc/gpio_num.h"
+#include "my_buttons.h"
 /*----------------------------------------------GPIO/MACROS-----------------------------------------------------------*/
 //i2s pins
 #define CONFIG_I2S_BCLK 11 // 25
@@ -76,6 +77,12 @@ static volatile uint32_t s_last_seq_tick = 0;
 static volatile uint32_t s_seq_tick_hook_count = 0;
 static volatile uint32_t s_render_block_count = 0;
 static volatile uint32_t s_last_render_sysclock_ms = 0;
+
+static QueueHandle_t s_button_queue = NULL;
+
+typedef struct {
+    my_button_id_t id;
+} button_msg_t;
 
 static void main_sequencer_tick_hook(uint32_t tick_count)
 {
@@ -122,12 +129,56 @@ static void amy_usb_render_task(void *arg) {
         next_deadline_us += block_us;
     }
 }
+// Button event callback: routes my_buttons events to sequencer UI actions
+static void button_handler_task(void *pvParameters)
+{
+    (void)pvParameters;
+    button_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(s_button_queue, &msg, portMAX_DELAY) == pdTRUE) {
+            switch (msg.id) {
+                case MY_BUTTON_0:
+                    sequencer_ui_toggle_playing();
+                    break;
+                case MY_BUTTON_1:
+                case MY_BUTTON_ENC:
+                    sequencer_ui_handle_button();
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+static void main_button_event_cb(my_button_id_t button_id, const char *event_str, void *user_data)
+{
+    (void)user_data;
+    if (strcmp(event_str, "BUTTON_PRESS_DOWN") != 0) return;
+
+    if (s_button_queue != NULL) {
+        button_msg_t msg = { .id = button_id };
+        (void)xQueueSend(s_button_queue, &msg, 0);
+    } else {
+        switch (button_id) {
+            case MY_BUTTON_0:
+                sequencer_ui_toggle_playing();
+                break;
+            case MY_BUTTON_1:
+            case MY_BUTTON_ENC:
+                sequencer_ui_handle_button();
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 //encoder
 static void encoder_task(void *pvParameters)
 {
     rotary_encoder_handle_t enc = (rotary_encoder_handle_t)pvParameters;
     long prev = last_count;
-    int prev_btn_state = 1; // Assuming pull-up, so 1 is unpressed
     for (;;) {
         long cur = rotary_encoder_get_count(enc);
         
@@ -142,16 +193,6 @@ static void encoder_task(void *pvParameters)
             sequencer_ui_handle_encoder(delta);
         }
 
-        int btn_state = gpio_get_level(ENCODER_PIN_BTN);
-        if (btn_state == 0 && prev_btn_state == 1) {
-            // Button pressed
-            ESP_LOGI(TAG, "Encoder button pressed");
-            sequencer_ui_handle_button();
-            // Simple debounce
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        prev_btn_state = btn_state;
-
         vTaskDelay(pdMS_TO_TICKS(20));  // Poll at 50Hz
     }
 }
@@ -163,16 +204,7 @@ static void encoder_init_task(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     ESP_LOGI(TAG, "[encoder_init] starting after delay");
-    
-    // Initialize button GPIO
-    gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << ENCODER_PIN_BTN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&btn_cfg);
+    // Button GPIO (GPIO16) is now managed by my_buttons/iot_button.
 
     rotary_encoder_config_t enc_cfg = rotary_encoder_default_config(ENCODER_PIN_A, ENCODER_PIN_B);
     rotary_encoder_handle_t enc = NULL;
@@ -388,6 +420,26 @@ static void pot_reader_task(void *pvParameters)
     }
 
     ESP_LOGI(TAG, "AMY + USB Audio ready (48 kHz stereo to PC)");
+
+    // Initialize push buttons (GPIO17, GPIO18, GPIO8, GPIO42)
+    ESP_LOGI(TAG, "[startup] before my_buttons_init");
+    s_button_queue = xQueueCreate(8, sizeof(button_msg_t));
+    if (s_button_queue == NULL) {
+        ESP_LOGW(TAG, "Button queue creation failed; callbacks will run inline");
+    } else {
+        if (xTaskCreate(button_handler_task, "button_task", 8192, NULL, 5, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "Button handler task creation failed");
+            vQueueDelete(s_button_queue);
+            s_button_queue = NULL;
+        }
+    }
+    esp_err_t btn_err = my_buttons_init();
+    if (btn_err != ESP_OK) {
+        ESP_LOGE(TAG, "my_buttons_init failed: %s", esp_err_to_name(btn_err));
+    } else {
+        ESP_LOGI(TAG, "[startup] after my_buttons_init");
+        my_buttons_register_cb(main_button_event_cb, NULL);
+    }
 
         // Setup rotary encoder
     // Defer rotary encoder initialization to a task to avoid early-boot conflicts

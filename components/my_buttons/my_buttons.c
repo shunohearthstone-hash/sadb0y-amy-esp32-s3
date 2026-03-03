@@ -14,10 +14,11 @@ static const char *TAG = "my_buttons";
 // Button GPIO assignments (active low with internal pull-up)
 // GPIO3 is ESP32-S3 strapping pin, using GPIO42 instead
 static const int32_t s_button_gpios[MY_BUTTON_MAX] = {
-    17,  // MY_BUTTON_0
-    18,  // MY_BUTTON_1
+    17,  // MY_BUTTON_0 → play/pause
+    18,  // MY_BUTTON_1 → step toggle
     8,   // MY_BUTTON_2
     42,  // MY_BUTTON_3 (avoiding GPIO3 strapping pin)
+    16,  // MY_BUTTON_ENC → encoder push button
 };
 
 static button_handle_t s_button_handles[MY_BUTTON_MAX] = {NULL};
