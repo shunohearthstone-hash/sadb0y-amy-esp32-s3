@@ -283,6 +283,13 @@ void amy_update_tasks() {
 int16_t *amy_render_audio() {
     int16_t *buf = NULL;
     if (amy_global.config.platform.multithread) {
+        TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+        if (amy_update_handle != current_task) {
+            amy_update_handle = current_task;
+            if (!AMY_HAS_I2S) {
+                xTaskNotifyGive(amy_fill_buffer_handle);
+            }
+        }
         // Wait for esp_fill_audio_buffer_task to indicate a buffer is ready.
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         buf = last_audio_buffer;

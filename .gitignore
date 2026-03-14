@@ -44,9 +44,9 @@ flasher_args.json # Generated in build directory
 /components/amy/experiments
 /components/amy/tests
 components/priv_i2c_u8g2/espressif example
-
-
-
+/components/amy/valgrind.supressions
+components/espressif__usb_device_uac
+components/espressif__tinyusb
 
 # For modern ESP-IDF component manager
 managed_components/
@@ -59,7 +59,7 @@ CMakeFiles/
 cmake_install.cmake
 install_manifest.txt
 CTestTestfile.cmake
-
+components/espressif__cmake_utilities
 # Python environment files
 *.pyc
 *.pyo
@@ -92,6 +92,7 @@ test/
 sounds/
 experiments/
 docs/
+ignored_docs
 components/u8g2_backup_before_ab
 # User-specific configuration files
 .history/

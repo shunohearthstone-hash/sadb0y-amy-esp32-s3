@@ -22,18 +22,21 @@
 #include "freertos/event_groups.h"
 #include "esp_err.h"
 #include "rotary_encoder.h"
+#include "sequencer_ui.h"
+#include "usb_audio.h"
+#include "esp_timer.h"
 #include <stdlib.h>
 #include <sys/_intsup.h>
 #include "esp_log.h"
 
-static const char *TAG = "main";
+static const char *TAG = "main"; // For ESP_LOG and related logs in this file
 
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "rom/ets_sys.h"
 #include "esp_adc/adc_oneshot.h"
 #include "soc/gpio_num.h"
-#include <math.h>
+#include "my_buttons.h"
 /*----------------------------------------------GPIO/MACROS-----------------------------------------------------------*/
 //i2s pins
 #define CONFIG_I2S_BCLK 11 // 25
@@ -49,6 +52,7 @@ static const char *TAG = "main";
 // Rotary encoder pins
 #define ENCODER_PIN_A GPIO_NUM_40
 #define ENCODER_PIN_B GPIO_NUM_41
+#define ENCODER_PIN_BTN GPIO_NUM_16
 
 #define u8g2_task_stack_size (8 * 1024) // 8KB stack for the u8g2 task
 
@@ -69,12 +73,22 @@ static volatile float s_last_pot_freq_hz = 0.0f;
 static volatile float s_last_sent_pot_freq_hz = 0.0f;
 static volatile long last_count = 0; // For encoder count
 static volatile long count = 0; // For encoder count
+static volatile uint32_t s_last_seq_tick = 0;
+static volatile uint32_t s_seq_tick_hook_count = 0;
+static volatile uint32_t s_render_block_count = 0;
+static volatile uint32_t s_last_render_sysclock_ms = 0;
 
+static QueueHandle_t s_button_queue = NULL;
 
-static void u8g2_task_function(void *pvParameters);
+typedef struct {
+    my_button_id_t id;
+} button_msg_t;
 
-/* helper from priv_i2c_u8g2 component */
-extern void demo_shapes(u8g2_t *u8g2);
+static void main_sequencer_tick_hook(uint32_t tick_count)
+{
+    s_last_seq_tick = tick_count;
+    s_seq_tick_hook_count++;
+}
 
 static void pot_log_task(void *pvParameters)
 {
@@ -83,6 +97,80 @@ static void pot_log_task(void *pvParameters)
     for (;;) {
         ESP_LOGI(TAG, "ADC: %d, Freq: %.1f Hz", s_last_pot_raw, s_last_pot_freq_hz);
         vTaskDelayUntil(&last, pdMS_TO_TICKS(500));
+    }
+}
+static void amy_usb_render_task(void *arg) {
+    (void)arg;
+    const uint64_t block_us = ((uint64_t)AMY_BLOCK_SIZE * 1000000ULL) / (uint64_t)AMY_SAMPLE_RATE;
+    uint64_t next_deadline_us = (uint64_t)esp_timer_get_time();
+    while (1) {
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        if (now_us < next_deadline_us) {
+            uint64_t wait_us = next_deadline_us - now_us;
+            TickType_t wait_ticks = pdMS_TO_TICKS((uint32_t)(wait_us / 1000ULL));
+            if (wait_ticks > 0) {
+                vTaskDelay(wait_ticks);
+            } else {
+                taskYIELD();
+            }
+            continue;
+        }
+
+        int16_t *block = amy_update();           // synthesizes everything / advances AMY sample clock
+        if (block) {
+            s_render_block_count++;
+            s_last_render_sysclock_ms = amy_sysclock();
+            esp_err_t write_err = usb_audio_write_stereo(block, AMY_BLOCK_SIZE);
+            if (write_err == ESP_ERR_NO_MEM) {
+                // USB ring buffer is full; briefly back off and try again.
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+        next_deadline_us += block_us;
+    }
+}
+// Button event callback: routes my_buttons events to sequencer UI actions
+static void button_handler_task(void *pvParameters)
+{
+    (void)pvParameters;
+    button_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(s_button_queue, &msg, portMAX_DELAY) == pdTRUE) {
+            switch (msg.id) {
+                case MY_BUTTON_0:
+                    sequencer_ui_toggle_playing();
+                    break;
+                case MY_BUTTON_1:
+                case MY_BUTTON_ENC:
+                    sequencer_ui_handle_button();
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+static void main_button_event_cb(my_button_id_t button_id, const char *event_str, void *user_data)
+{
+    (void)user_data;
+    if (strcmp(event_str, "BUTTON_PRESS_DOWN") != 0) return;
+
+    if (s_button_queue != NULL) {
+        button_msg_t msg = { .id = button_id };
+        (void)xQueueSend(s_button_queue, &msg, 0);
+    } else {
+        switch (button_id) {
+            case MY_BUTTON_0:
+                sequencer_ui_toggle_playing();
+                break;
+            case MY_BUTTON_1:
+            case MY_BUTTON_ENC:
+                sequencer_ui_handle_button();
+                break;
+            default:
+                break;
+        }
     }
 }
 
@@ -102,8 +190,9 @@ static void encoder_task(void *pvParameters)
             last_count = prev;  // Store the previous count for display
             count = cur;        // Update current count
             prev = cur;
-            // Example: translate count -> amy_event here (use amy_add_event)
+            sequencer_ui_handle_encoder(delta);
         }
+
         vTaskDelay(pdMS_TO_TICKS(20));  // Poll at 50Hz
     }
 }
@@ -115,12 +204,17 @@ static void encoder_init_task(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     ESP_LOGI(TAG, "[encoder_init] starting after delay");
+    // Button GPIO (GPIO16) is now managed by my_buttons/iot_button.
+
     rotary_encoder_config_t enc_cfg = rotary_encoder_default_config(ENCODER_PIN_A, ENCODER_PIN_B);
     rotary_encoder_handle_t enc = NULL;
     esp_err_t err = rotary_encoder_new_with_config(&enc_cfg, &enc);
     ESP_LOGI(TAG, "[encoder_init] rotary_encoder_new_with_config returned %d", err);
     if (err == ESP_OK && enc) {
-        xTaskCreate(encoder_task, "encoder_task", 4096, enc, 5, NULL);
+        // Increase encoder task stack to avoid stack overflow when handling
+        // amy_event-heavy operations (sequencer toggles create several
+        // amy_event/delta conversions on the stack).
+        xTaskCreate(encoder_task, "encoder_task", 8192, enc, 5, NULL);
     }
 
     vTaskDelete(NULL);
@@ -135,9 +229,7 @@ static void encoder_init_task(void *pvParameters)
 // AMY synth states
 extern struct state amy_global;
 
-static void esp_show_debug(uint8_t t) {
-    (void)t;
-}
+
 
 static amy_err_t setup_pot_adc(void) {
     adc_oneshot_unit_init_cfg_t init_cfg = {
@@ -159,15 +251,7 @@ static amy_err_t setup_pot_adc(void) {
     return AMY_OK;
 }
 
-static void start_test_tone(uint32_t start) {
-    amy_event e = amy_default_event();
-    e.time = start;
-    e.osc = 0;
-    e.wave = SINE;
-    e.velocity = 0.7f;
-    e.freq_coefs[0] = 220.0f;
-    amy_add_event(&e);
-}
+
 
 /* 
 static void update_tone_effect_from_pot(uint32_t now) {
@@ -212,26 +296,19 @@ static void pot_reader_task(void *pvParameters)
         }
 
         float normalized = (float)raw / 4095.0f;
-        float freq_hz = 110.0f + (normalized * 770.0f);
+        uint16_t bpm = 80 + (uint16_t)(normalized * 60.0f);
 
         // Update last-seen values for logging/UI
-       s_last_pot_raw = raw;
-        s_last_pot_freq_hz = freq_hz;
+        s_last_pot_raw = raw;
+        s_last_pot_freq_hz = bpm; // Reusing this variable for logging
 
         // Compare against last sent frequency and only trigger AMY when change
         // exceeds the configured threshold (CHANGE_DELTA_HZ)
-        if (fabsf(freq_hz - s_last_sent_pot_freq_hz) > CHANGE_DELTA_HZ) {
-            // Prepare and send the AMY event at current sysclock.
-            // Use a static event to avoid allocating a large struct on the task stack.
-            static amy_event e;
-            e = amy_default_event();
-            e.time = amy_sysclock();
-            e.osc = 0;
-            e.freq_coefs[0] = freq_hz;
-            amy_add_event(&e);
+        if (abs(bpm - (uint16_t)s_last_sent_pot_freq_hz) > 0) {
+            sequencer_ui_set_bpm(bpm);
 
             // Remember the last value we sent
-            s_last_sent_pot_freq_hz = freq_hz;
+            s_last_sent_pot_freq_hz = bpm;
         }
 
         // Poll at a modest rate
@@ -239,44 +316,6 @@ static void pot_reader_task(void *pvParameters)
     }
 }
 
-static void u8g2_task_function(void *pvParameters)
-{
-    (void)pvParameters;
-    if (s_u8g2 == NULL) {
-        vTaskDelete(NULL);
-        return;
-    }
-
-     u8g2_SetFont(s_u8g2, u8g2_font_6x10_tf);
-
-    for (;;) {
-        char line[32];
-        u8g2_ClearBuffer(s_u8g2);
-
-        u8g2_DrawStr(s_u8g2, 0, 12, "AMY Synth READY");
-
-        snprintf(line, sizeof(line), "ADC: %d %.1fHz", s_last_pot_raw, s_last_pot_freq_hz);
-        u8g2_DrawStr(s_u8g2, 0, 24, line);
-
-        snprintf(line, sizeof(line),
-         "Encoder Count: %li",
-          (long)count);
-
-        u8g2_DrawStr(s_u8g2, 0, 36, line);
-        snprintf(line, sizeof(line),
-         " Delta: %li",
-           (long)(count - last_count));
-        u8g2_DrawStr(s_u8g2, 0, 48, line);
-
-        u8g2_SendBuffer(s_u8g2);
-
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        // Show demo shapes for 1 second
-      // demo_shapes(s_u8g2);
-        //vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
 
     void app_main(void)
 {
@@ -353,16 +392,54 @@ static void u8g2_task_function(void *pvParameters)
 
     // Configure and start AMY
     amy_config_t amy_cfg = amy_default_config();
-    amy_cfg.audio = AMY_AUDIO_IS_I2S;
-    amy_cfg.i2s_bclk = CONFIG_I2S_BCLK;
-    amy_cfg.i2s_lrc = CONFIG_I2S_LRCLK;
-    amy_cfg.i2s_dout = CONFIG_I2S_DIN;
-    amy_cfg.i2s_din = -1;
-    amy_cfg.i2s_mclk = -1;
+    amy_cfg.audio = AMY_AUDIO_IS_NONE; //changed from audio is none
+    amy_cfg.amy_external_sequencer_hook = main_sequencer_tick_hook;
     ESP_LOGI(TAG, "Starting AMY synth engine... (audio=%d, Fs=%d)", amy_cfg.audio, AMY_SAMPLE_RATE);
     ESP_LOGI(TAG, "[startup] before amy_start");
     amy_start(amy_cfg);
+    
+    // Our USB Audio (must be after TinyUSB init)
+    ESP_ERROR_CHECK(usb_audio_init());
+
+    sequencer_ui_init(s_u8g2);
     ESP_LOGI(TAG, "[startup] after amy_start");
+    
+    TaskHandle_t amy_render_task_handle = NULL;
+    BaseType_t render_task_ok;
+#if CONFIG_FREERTOS_UNICORE
+    render_task_ok = xTaskCreatePinnedToCore(amy_usb_render_task, "amy_render", 8192, NULL, 7, &amy_render_task_handle, 0);
+#else
+    render_task_ok = xTaskCreatePinnedToCore(amy_usb_render_task, "amy_render", 8192, NULL, 7, &amy_render_task_handle, 1);
+#endif
+    if (render_task_ok != pdPASS) {
+        ESP_LOGW(TAG, "amy_render pinned task create failed (%ld), retrying unpinned", (long)render_task_ok);
+        render_task_ok = xTaskCreate(amy_usb_render_task, "amy_render", 8192, NULL, 7, &amy_render_task_handle);
+    }
+    if (render_task_ok != pdPASS) {
+        ESP_LOGE(TAG, "amy_render task create failed (%ld)", (long)render_task_ok);
+    }
+
+    ESP_LOGI(TAG, "AMY + USB Audio ready (48 kHz stereo to PC)");
+
+    // Initialize push buttons (GPIO17, GPIO18, GPIO8, GPIO42)
+    ESP_LOGI(TAG, "[startup] before my_buttons_init");
+    s_button_queue = xQueueCreate(8, sizeof(button_msg_t));
+    if (s_button_queue == NULL) {
+        ESP_LOGW(TAG, "Button queue creation failed; callbacks will run inline");
+    } else {
+        if (xTaskCreate(button_handler_task, "button_task", 8192, NULL, 5, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "Button handler task creation failed");
+            vQueueDelete(s_button_queue);
+            s_button_queue = NULL;
+        }
+    }
+    esp_err_t btn_err = my_buttons_init();
+    if (btn_err != ESP_OK) {
+        ESP_LOGE(TAG, "my_buttons_init failed: %s", esp_err_to_name(btn_err));
+    } else {
+        ESP_LOGI(TAG, "[startup] after my_buttons_init");
+        my_buttons_register_cb(main_button_event_cb, NULL);
+    }
 
         // Setup rotary encoder
     // Defer rotary encoder initialization to a task to avoid early-boot conflicts
@@ -374,19 +451,12 @@ static void u8g2_task_function(void *pvParameters)
     setup_pot_adc();
     ESP_LOGI(TAG, "[startup] after setup_pot_adc");
     
-    uint32_t start_time = amy_sysclock();
-    amy_reset_oscs();
-
+   
     ESP_LOGI(TAG, "Scheduling test tone on OSC 0...");
-    start_test_tone(start_time + 200);
+   // start_test_tone(start_time + 200);
 
-    xTaskCreate(
-        u8g2_task_function,
-         "u8g2_task_function",
-         u8g2_task_stack_size,
-         NULL,
-         5,
-         NULL);
+    
+
     xTaskCreate(
         pot_log_task,
          "pot_log_task",
@@ -409,7 +479,9 @@ static void u8g2_task_function(void *pvParameters)
     ESP_LOGI(TAG, "Main loop started: pot reader task running");
     // Idle loop; pot_reader_task handles all pot->synth updates.
     while (1) {
-        ESP_LOGI(TAG, "Main loop idle..."); // Log to show we're alive; actual work is in tasks.
+        ESP_LOGI(TAG,
+                 "Main loop idle... seq_tick=%" PRIu32 " tick_hook_calls=%" PRIu32 " render_blocks=%" PRIu32 " render_sysclock_ms=%" PRIu32,
+                 s_last_seq_tick, s_seq_tick_hook_count, s_render_block_count, s_last_render_sysclock_ms);
         vTaskDelay(pdMS_TO_TICKS(5000));        }
     }
 
