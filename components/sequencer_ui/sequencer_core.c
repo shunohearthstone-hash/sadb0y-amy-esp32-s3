@@ -14,6 +14,9 @@ extern uint32_t sequencer_ticks(void);
 #define SEQ_GATE_TICKS (SEQ_TICKS_PER_STEP / 3)
 #define SEQ_MIN_BPM 40
 #define SEQ_MAX_BPM 300
+#define SEQ_DRUM_SYNTH 10
+#define SEQ_DRUM_PATCH 1025
+#define SEQ_DRUM_VOICES 6
 
 // GM drum MIDI notes per track: hat, kick, snare, cowbell
 static const uint8_t track_midi_notes[SEQ_TRACKS] = {42, 35, 38, 56};
@@ -22,6 +25,17 @@ static bool playing = true;
 static uint16_t bpm = 120;
 static bool grid[SEQ_TRACKS][SEQ_STEPS] = {0};
 static uint8_t current_step = 0;
+
+static void sequencer_configure_drum_synth(void) {
+    amy_event e = amy_default_event();
+
+    e.patch_number = SEQ_DRUM_PATCH;
+    patches_store_patch(&e, "w7f0");
+    e.num_voices = SEQ_DRUM_VOICES;
+    e.synth = SEQ_DRUM_SYNTH;
+    e.synth_flags = _SYNTH_FLAGS_MIDI_DRUMS | _SYNTH_FLAGS_IGNORE_NOTE_OFFS;
+    amy_add_event(&e);
+}
 
 static uint8_t sequencer_tag_from_pos(uint8_t track, uint8_t step, bool note_off_tag) {
     uint8_t base = (uint8_t)(track * SEQ_STEPS + step);
@@ -61,8 +75,7 @@ static void sequencer_emit_step_event(uint8_t track, uint8_t step) {
     }
 
     amy_event e = amy_default_event();
-    e.synth = 10;
-    e.synth_flags = _SYNTH_FLAGS_MIDI_DRUMS |_SYNTH_FLAGS_IGNORE_NOTE_OFFS; // 3, flag(0x01) + (0x02) = MIDI drums + ignore note offs. Defined in amy.h
+    e.synth = SEQ_DRUM_SYNTH;
     e.midi_note = track_midi_notes[track];
     e.velocity = 1.0f;
     e.sequence[SEQUENCE_TAG] = tag_on;
@@ -71,7 +84,7 @@ static void sequencer_emit_step_event(uint8_t track, uint8_t step) {
     amy_add_event(&e);
 
     e = amy_default_event();
-    e.synth = 10;
+    e.synth = SEQ_DRUM_SYNTH;
     e.midi_note = track_midi_notes[track];
     e.velocity = 0.0f;
     e.sequence[SEQUENCE_TAG] = tag_off;
@@ -116,6 +129,7 @@ void sequencer_core_init(void) {
         }
     }
 
+    sequencer_configure_drum_synth();
     bpm = sequencer_clamp_bpm(bpm);
     current_step = 0;
     sequencer_push_tempo(bpm);

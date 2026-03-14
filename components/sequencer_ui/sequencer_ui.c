@@ -1,7 +1,6 @@
 #include "sequencer_ui.h"
 #include "priv_u8g2_seq.h"
 #include "sequencer_core.h"
-#include "amy.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -101,23 +100,6 @@ void sequencer_ui_handle_button(void) {
             sequencer_core_set_step(t, s, true);   // turn ON
         } else {
             sequencer_core_set_step(t, s, false);  // turn OFF
-        }
-
-        // Immediate audio feedback (your original code — kept)
-        if (seq_state.grid[t][s]) {
-            amy_event e = amy_default_event();
-            e.time = amy_sysclock();
-            e.osc = t;
-            e.wave = SINE;
-            e.velocity = 1.0f;
-            if (t == 0) e.freq_coefs[0] = 60.0f;
-            else if (t == 1) e.freq_coefs[0] = 200.0f;
-            else if (t == 2) e.freq_coefs[0] = 800.0f;
-            else if (t == 3) e.freq_coefs[0] = 400.0f;
-            e.eg_type[0] = ENVELOPE_NORMAL;
-            e.eg0_times[0] = 10;  e.eg0_values[0] = 1.0f;
-            e.eg0_times[1] = 100; e.eg0_values[1] = 0.0f;
-            amy_add_event(&e);
         }
     } else {
         // Toggle play/pause
